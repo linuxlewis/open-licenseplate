@@ -65,8 +65,7 @@ def browser_base_url(tmp_path: Path) -> Iterator[str]:
 
 @pytest.fixture
 def chromium():
-    pytest.importorskip("playwright.sync_api")
-    from playwright.sync_api import Error, sync_playwright
+    from playwright.sync_api import sync_playwright
 
     candidates = [
         os.environ.get("OPEN_LICENSEPLATE_CHROMIUM"),
@@ -78,13 +77,10 @@ def chromium():
         None,
     )
     with sync_playwright() as playwright:
-        try:
-            browser = playwright.chromium.launch(
-                headless=True,
-                **({"executable_path": executable} if executable else {}),
-            )
-        except Error as error:
-            pytest.skip(f"Chromium is not available: {error}")
+        browser = playwright.chromium.launch(
+            headless=True,
+            **({"executable_path": executable} if executable else {}),
+        )
         yield browser
         browser.close()
 

@@ -6,16 +6,18 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import parse_qs
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .config import AppSettings, load_settings
-from .database import database_status
+from .config import AppSettings, UISettings, load_settings
+from .database import Database, database_status
 from .logging import configure_logging
 from .paths import ManagedPaths
+from .settings_store import SettingsStore
 from .web import STATIC_DIRECTORY, render_page
 
 logger = logging.getLogger("open_licenseplate")
@@ -132,6 +134,35 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     @application.get("/system", name="system_page", include_in_schema=False)
     async def system_page(request: Request) -> Any:
         return render_page(request, effective_settings, paths, "system")
+
+    @application.post("/system/preferences", include_in_schema=False)
+    async def save_system_preferences(request: Request) -> RedirectResponse:
+        form = parse_qs((await request.body()).decode("utf-8"))
+        density = form.get("density", [""])[0]
+        try:
+            updated_ui = UISettings.model_validate({"density": density})
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400,
+                detail="density must be comfortable or compact",
+            ) from error
+
+        status = database_status(paths.database)
+        if status["status"] != "ok":
+            raise HTTPException(
+                status_code=409,
+                detail="database is not ready; run `open-licenseplate db upgrade` first",
+            )
+
+        database = Database(paths.database)
+        try:
+            SettingsStore(database).set("ui.density", updated_ui.density)
+        finally:
+            database.dispose()
+
+        effective_settings.ui.density = updated_ui.density
+        effective_settings._sources["ui.density"] = "persisted"
+        return RedirectResponse("/system", status_code=303)
 
     @application.get("/api/v1/health/live")
     async def live_health() -> dict[str, str]:

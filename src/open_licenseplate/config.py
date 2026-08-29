@@ -54,6 +54,14 @@ class StorageSettings(BaseModel):
     log_dir: Path = Field(default_factory=lambda: Path(user_log_dir("open-licenseplate")))
 
 
+class UISettings(BaseModel):
+    """Display settings that are safe to persist."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    density: Literal["comfortable", "compact"] = "comfortable"
+
+
 class AppSettings(BaseSettings):
     """Effective settings after default, environment, and CLI layers."""
 
@@ -69,6 +77,7 @@ class AppSettings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     server: ServerSettings = Field(default_factory=ServerSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    ui: UISettings = Field(default_factory=UISettings)
 
     _sources: dict[str, str] = PrivateAttr(default_factory=dict)
 

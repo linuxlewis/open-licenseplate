@@ -107,6 +107,41 @@ def test_system_page_shows_versions_paths_database_and_setting_sources(tmp_path:
     assert "Core ML support is not part of M0." in response.text
 
 
+def test_system_density_preference_persists_and_applies_after_restart(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    database_path = settings.storage.data_dir / "open-licenseplate.sqlite3"
+    upgrade_database(database_path)
+
+    with TestClient(create_app(settings)) as client:
+        before_response = client.get("/system")
+        save_response = client.post(
+            "/system/preferences",
+            data={"density": "compact"},
+            follow_redirects=False,
+        )
+        after_response = client.get("/system")
+
+    assert before_response.status_code == 200
+    assert 'class="density-comfortable"' in before_response.text
+    assert save_response.status_code == 303
+    assert save_response.headers["location"] == "/system"
+    assert after_response.status_code == 200
+    assert 'class="density-compact"' in after_response.text
+    assert 'value="compact" selected' in after_response.text
+    assert "UI density" in after_response.text
+    assert "persisted" in after_response.text
+
+    restarted_settings = _settings(tmp_path)
+    assert restarted_settings.ui.density == "compact"
+    assert restarted_settings.sources["ui.density"] == "persisted"
+
+    with TestClient(create_app(restarted_settings)) as client:
+        restarted_response = client.get("/system")
+
+    assert restarted_response.status_code == 200
+    assert 'class="density-compact"' in restarted_response.text
+
+
 def test_shell_escapes_rendered_setting_values(tmp_path: Path) -> None:
     settings = load_settings(
         cli_overrides={

@@ -160,6 +160,7 @@ def _setting_rows(settings: AppSettings) -> list[dict[str, str]]:
         ("Log level", "log_level", settings.log_level),
         ("Server host", "server.host", settings.server.host),
         ("Server port", "server.port", settings.server.port),
+        ("UI density", "ui.density", settings.ui.density),
         (
             "Unsafe development binding",
             "server.unsafe_development",
@@ -230,6 +231,7 @@ def _context(
         "request": request,
         "app_name": settings.app_name,
         "app_version": __version__,
+        "ui_density": settings.ui.density,
         "page": page,
         "nav_items": _nav_items(active_key),
         "global_status": _global_status(database, directories),

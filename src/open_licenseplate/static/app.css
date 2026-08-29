@@ -297,6 +297,28 @@ h2 {
   background: rgba(255, 253, 248, 0.42);
 }
 
+body.density-compact {
+  font-size: 14px;
+}
+
+body.density-compact .shell {
+  padding-top: 16px;
+}
+
+body.density-compact .card {
+  padding: 20px;
+}
+
+body.density-compact .empty-card {
+  min-height: 310px;
+  padding: 36px;
+}
+
+body.density-compact .status-item {
+  padding-top: 14px;
+  padding-bottom: 14px;
+}
+
 .empty-card,
 .card,
 .status-strip {
@@ -515,6 +537,63 @@ h2 {
   margin: 18px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+.form-note {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preference-form {
+  display: grid;
+  gap: 8px;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.preference-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+select,
+.save-button {
+  min-height: 40px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  font: inherit;
+}
+
+select {
+  min-width: 0;
+  padding: 0 32px 0 11px;
+  color: var(--ink);
+  background: var(--paper-strong);
+}
+
+.save-button {
+  padding: 0 13px;
+  border-color: var(--accent);
+  color: var(--paper-strong);
+  font-size: 12px;
+  font-weight: 800;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.save-button:hover,
+.save-button:focus-visible {
+  border-color: var(--accent-dark);
+  background: var(--accent-dark);
+  outline: none;
 }
 
 .detail-list {
@@ -790,12 +869,26 @@ code {
     padding: 20px;
   }
 
+  body.density-compact .card {
+    padding: 17px;
+  }
+
   .stat-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .path-grid {
     grid-template-columns: 1fr;
+  }
+
+  .preference-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  select,
+  .save-button {
+    width: 100%;
   }
 }
 

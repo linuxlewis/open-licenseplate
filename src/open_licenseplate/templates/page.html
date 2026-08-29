@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
     <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
   </head>
-  <body hx-boost="true">
+  <body class="density-{{ ui_density }}">
     <div class="app-background" aria-hidden="true"></div>
     <div class="shell">
       <header class="topbar">
@@ -34,7 +34,7 @@
             <span class="eyebrow">Operator console</span>
             <p>Keep local state visible. Add runtime capability only when it is ready.</p>
           </div>
-          <nav class="primary-nav">
+          <nav class="primary-nav" hx-boost="true">
             {% for item in nav_items %}
               <a
                 class="nav-link{% if item.active %} nav-link-active{% endif %}"
@@ -140,6 +140,39 @@
                     </tbody>
                   </table>
                 </div>
+              </section>
+
+              <section class="card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Interface</span>
+                    <h2>Display density</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">UI</span>
+                </div>
+                <p class="form-note">
+                  Choose a comfortable or compact spacing scale for the local operator console.
+                </p>
+                {% if database.status == "ok" %}
+                  <form class="preference-form" method="post" action="/system/preferences">
+                    <label class="field-label" for="ui-density">UI density</label>
+                    <div class="preference-controls">
+                      <select id="ui-density" name="density">
+                        <option value="comfortable" {% if ui_density == "comfortable" %}selected{% endif %}>
+                          Comfortable
+                        </option>
+                        <option value="compact" {% if ui_density == "compact" %}selected{% endif %}>
+                          Compact
+                        </option>
+                      </select>
+                      <button class="save-button" type="submit">Save preference</button>
+                    </div>
+                  </form>
+                {% else %}
+                  <p class="form-note">
+                    Run the database upgrade command before saving a display preference.
+                  </p>
+                {% endif %}
               </section>
 
               <section class="card card-wide">

@@ -17,7 +17,9 @@ browser. The M0 slice provides startup, health checks, managed paths,
 diagnostics, SQLite persistence, the first migration, and a Jinja/HTMX shell.
 The shell includes Live, Events, Jobs, Cameras, Models, and System pages. The
 future product pages use clear empty states until their milestone is complete.
-Camera, model, tracking, and processing features arrive in later milestones.
+The System page can save a comfortable or compact display density in the local
+settings table. Camera, model, tracking, and processing features arrive in
+later milestones.
 
 `db upgrade` creates or upgrades the managed SQLite database. The database uses
 WAL mode, full synchronous writes, foreign keys, and a 5-second busy timeout.
@@ -42,6 +44,6 @@ uv run ruff format --check .
 uv run mypy src
 ```
 
-The browser smoke test uses a local Chromium executable. Set
-`OPEN_LICENSEPLATE_CHROMIUM` when Chromium is not installed in a standard
-location.
+The browser smoke test uses Playwright Chromium or a local Chromium executable.
+Set `OPEN_LICENSEPLATE_CHROMIUM` when Chromium is not installed in a standard
+location. CI installs Playwright Chromium before the browser test step.

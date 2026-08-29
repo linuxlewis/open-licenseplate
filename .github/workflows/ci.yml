@@ -37,5 +37,11 @@ jobs:
       - name: Run Mypy
         run: uv run mypy src
 
+      - name: Install Chromium for browser smoke tests
+        run: uv run playwright install --with-deps chromium
+
+      - name: Run browser smoke tests
+        run: uv run pytest -m browser
+
       - name: Run tests
-        run: uv run pytest
+        run: uv run pytest -m "not browser"
