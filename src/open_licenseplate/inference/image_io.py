@@ -45,12 +45,14 @@ def decode_still_image(raw_bytes: bytes) -> DecodedStillImage:
                 _validate_dimensions(width, height)
                 if image_format not in {"JPEG", "PNG"}:
                     raise StillImageDecodeError("image format must be JPEG or PNG")
+                _validate_single_frame_count(probe)
                 probe.verify()
 
             with Image.open(BytesIO(raw_bytes)) as decoded:
                 if decoded.format != image_format:
                     raise StillImageDecodeError("image format could not be validated")
                 _validate_dimensions(*decoded.size)
+                _validate_single_frame_geometry(decoded)
                 decoded.load()
                 pixels = np.asarray(decoded.convert("RGB"), dtype=np.uint8).copy()
     except StillImageDecodeError:
@@ -77,3 +79,21 @@ def _validate_dimensions(width: int, height: int) -> None:
         or width * height > MAX_STILL_IMAGE_PIXELS
     ):
         raise StillImageDecodeError("image dimensions exceed the safe limit")
+
+
+def _validate_single_frame_geometry(image: Image.Image) -> None:
+    """Reject animation and display transforms that change source geometry."""
+    _validate_single_frame_count(image)
+    try:
+        orientation = image.getexif().get(274, 1)
+    except (OSError, ValueError, TypeError):
+        raise StillImageDecodeError("image EXIF orientation is invalid") from None
+    if orientation != 1:
+        raise StillImageDecodeError("image EXIF orientation must be identity")
+
+
+def _validate_single_frame_count(image: Image.Image) -> None:
+    """Reject animation before the decoder can select a different frame."""
+    frame_count = getattr(image, "n_frames", 1)
+    if not isinstance(frame_count, int) or frame_count != 1:
+        raise StillImageDecodeError("image must contain exactly one frame")

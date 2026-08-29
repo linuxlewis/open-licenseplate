@@ -22,6 +22,30 @@ def _gif_bytes() -> bytes:
     return output.getvalue()
 
 
+def _animated_png_bytes() -> bytes:
+    output = BytesIO()
+    first = Image.new("RGB", (2, 2), (0, 0, 0))
+    second = Image.new("RGB", (2, 2), (255, 255, 255))
+    first.save(
+        output,
+        format="PNG",
+        save_all=True,
+        append_images=[second],
+        duration=100,
+        loop=0,
+    )
+    return output.getvalue()
+
+
+def _rotated_jpeg_bytes() -> bytes:
+    output = BytesIO()
+    exif = Image.Exif()
+    exif[274] = 6
+    exif[270] = "PRIVATE-EXIF-CONTENT"
+    Image.new("RGB", (8, 4), (20, 30, 40)).save(output, format="JPEG", exif=exif)
+    return output.getvalue()
+
+
 def test_decode_preserves_original_bytes_and_source_geometry() -> None:
     raw = (FIXTURE_ROOT / "plate.png").read_bytes()
 
@@ -44,6 +68,16 @@ def test_decode_preserves_original_bytes_and_source_geometry() -> None:
 def test_decode_rejects_malformed_and_unsupported_data(raw: bytes, message: str) -> None:
     with pytest.raises(StillImageDecodeError, match=message):
         decode_still_image(raw)
+
+
+def test_decode_rejects_multi_frame_png() -> None:
+    with pytest.raises(StillImageDecodeError, match="exactly one frame"):
+        decode_still_image(_animated_png_bytes())
+
+
+def test_decode_rejects_non_identity_exif_orientation_without_transposing() -> None:
+    with pytest.raises(StillImageDecodeError, match="orientation must be identity"):
+        decode_still_image(_rotated_jpeg_bytes())
 
 
 def test_decode_rejects_oversized_upload_before_image_parsing() -> None:

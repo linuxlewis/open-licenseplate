@@ -254,7 +254,7 @@ def test_browser_can_import_and_manage_a_model_package(
     page.wait_for_url(f"{browser_base_url}/models?notice=imported")
 
     assert page.get_by_role("heading", name="Test model", exact=True).is_visible()
-    assert page.get_by_role("button", name="Activation pending P08", exact=True).is_visible()
+    assert page.get_by_role("button", name="Runtime validation required", exact=True).is_visible()
     assert "Runtime validation was not run" in page.content()
     page.get_by_role("button", name="Delete", exact=True).click()
     page.wait_for_url(f"{browser_base_url}/models?notice=deleted")

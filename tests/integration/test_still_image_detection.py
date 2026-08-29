@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from model_helpers import create_model_fixture
 from open_licenseplate.app import create_app
@@ -40,6 +42,30 @@ def _fixture_outputs(prepared: Any) -> dict[str, Any]:
         "coordinates": np.array([[160, 280, 480, 360]], dtype=np.float32),
         "confidence": np.array([0.9], dtype=np.float32),
     }
+
+
+def _animated_png_bytes() -> bytes:
+    output = BytesIO()
+    first = Image.new("RGB", (2, 2), (0, 0, 0))
+    second = Image.new("RGB", (2, 2), (255, 255, 255))
+    first.save(
+        output,
+        format="PNG",
+        save_all=True,
+        append_images=[second],
+        duration=100,
+        loop=0,
+    )
+    return output.getvalue()
+
+
+def _rotated_jpeg_bytes() -> bytes:
+    output = BytesIO()
+    exif = Image.Exif()
+    exif[274] = 6
+    exif[270] = "PRIVATE-EXIF-CONTENT"
+    Image.new("RGB", (8, 4), (20, 30, 40)).save(output, format="JPEG", exif=exif)
+    return output.getvalue()
 
 
 def _client_with_fake_model(
@@ -184,12 +210,42 @@ def test_detect_image_rejects_bad_input_without_model_or_path_details(
                 )
             },
         )
+        animated = client.post(
+            f"/api/v1/models/{model_id}/detect-image",
+            files={
+                "image": (
+                    "private-animated.png",
+                    _animated_png_bytes(),
+                    "image/png",
+                )
+            },
+        )
+        rotated = client.post(
+            f"/api/v1/models/{model_id}/detect-image",
+            files={
+                "image": (
+                    "private-rotated.jpg",
+                    _rotated_jpeg_bytes(),
+                    "image/jpeg",
+                )
+            },
+        )
 
     assert malformed.status_code == 422
     assert "malformed" in malformed.json()["detail"] or "JPEG or PNG" in malformed.json()["detail"]
     assert "secret-name.gif" not in malformed.text
+    assert str(tmp_path) not in malformed.text
     assert oversized.status_code == 413
     assert "private-image.png" not in oversized.text
+    assert str(tmp_path) not in oversized.text
+    assert animated.status_code == 422
+    assert "private-animated.png" not in animated.text
+    assert "PRIVATE-EXIF-CONTENT" not in animated.text
+    assert str(tmp_path) not in animated.text
+    assert rotated.status_code == 422
+    assert "private-rotated.jpg" not in rotated.text
+    assert "PRIVATE-EXIF-CONTENT" not in rotated.text
+    assert str(tmp_path) not in rotated.text
 
 
 def test_detect_image_rejects_incompatible_backend_contract_safely(tmp_path: Path) -> None:
