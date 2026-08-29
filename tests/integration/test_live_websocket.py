@@ -214,3 +214,41 @@ def test_live_app_shutdown_closes_processed_display_worker(tmp_path: Path) -> No
     metrics = application.state.live_pipeline._display.metrics()
     assert metrics.closed is True
     assert metrics.subscriber_count == 0
+
+
+def test_live_websocket_gets_safe_shutdown_state_during_app_close(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    source = _source_fixture()
+    backend = FakeBackend(output_factory=_outputs)
+    application = create_app(
+        settings,
+        source_factory=source,
+        inference_backend_factory=lambda: backend,
+    )
+
+    with TestClient(application) as client:
+        camera_id = _create_camera(client)
+        model_id = _import_and_validate(client, tmp_path / "model")
+        assert (
+            client.post(
+                "/api/v1/live/start",
+                json={"camera_id": camera_id, "model_id": model_id},
+            ).status_code
+            == 200
+        )
+        _wait_for_processed(client)
+
+        with client.websocket_connect("/api/v1/live/ws") as websocket:
+            websocket.receive_json()
+            websocket.receive_bytes()
+            application.state.live_pipeline.close()
+            state = websocket.receive_json()
+            assert state == {
+                "type": "state",
+                "protocol_version": LIVE_PROTOCOL_VERSION,
+                "state": "shutdown",
+            }
+            assert application.state.live_pipeline._display.metrics().subscriber_count == 0
+            encoder_thread = application.state.live_pipeline._display.encoder_thread
+            assert encoder_thread is None or not encoder_thread.is_alive()

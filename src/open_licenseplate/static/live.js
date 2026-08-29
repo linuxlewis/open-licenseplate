@@ -24,7 +24,10 @@
 
   let displaySocket = null;
   let pendingHeader = null;
+  let activeGeneration = null;
   let activeEpoch = null;
+  let activeCaptureSession = null;
+  const retiredProvenances = [];
   let lastSequence = -1;
   let currentHeader = null;
   let currentObjectUrl = null;
@@ -44,6 +47,9 @@
       : "Unavailable";
   const formatCount = (value) =>
     typeof value === "number" && Number.isFinite(value) ? String(Math.max(0, value)) : "0";
+  const maxDimension = 8192;
+  const maxDetections = 256;
+  const maxMetadataMetrics = 64;
 
   const request = async (path, options = {}) => {
     const response = await fetch(path, {
@@ -131,6 +137,8 @@
     document.querySelector("#live-processed-sequence").textContent = String(
       header.frame_sequence,
     );
+    document.querySelector("#live-processed-epoch").textContent = header.stream_epoch;
+    document.querySelector("#live-processed-session").textContent = header.capture_session_id;
   };
 
   const ensureOverlayCanvas = () => {
@@ -201,13 +209,109 @@
     }
   };
 
+  const validateState = (state) => {
+    if (
+      !state ||
+      state.type !== "state" ||
+      state.protocol_version !== 1 ||
+      !["starting", "warming", "running", "stopping", "stopped", "failed", "shutdown"].includes(
+        state.state,
+      )
+    ) {
+      throw new Error("The processed display protocol is invalid.");
+    }
+  };
+
+  const validateDetection = (detection, header) => {
+    if (
+      !detection ||
+      !Array.isArray(detection.box_xyxy) ||
+      detection.box_xyxy.length !== 4 ||
+      typeof detection.label !== "string" ||
+      detection.label.length === 0 ||
+      typeof detection.model_id !== "string" ||
+      detection.model_id !== header.model_id ||
+      typeof detection.model_checksum !== "string" ||
+      detection.model_checksum !== header.model_checksum ||
+      !Number.isInteger(detection.frame_sequence) ||
+      detection.frame_sequence !== header.frame_sequence ||
+      typeof detection.confidence !== "number" ||
+      !Number.isFinite(detection.confidence) ||
+      detection.confidence < 0 ||
+      detection.confidence > 1
+    ) {
+      throw new Error("The processed detection provenance is invalid.");
+    }
+    const [x1, y1, x2, y2] = detection.box_xyxy.map(Number);
+    if (
+      ![x1, y1, x2, y2].every(Number.isFinite) ||
+      x1 < 0 ||
+      y1 < 0 ||
+      x1 > x2 ||
+      y1 > y2 ||
+      x2 > header.source_width ||
+      y2 > header.source_height
+    ) {
+      throw new Error("The processed detection geometry is invalid.");
+    }
+  };
+
+  const validateRoi = (roi, header) => {
+    if (roi === null) {
+      return;
+    }
+    if (
+      !roi ||
+      Object.keys(roi).sort().join(",") !== "height,width,x,y" ||
+      !["x", "y", "width", "height"].every((key) => Number.isInteger(roi[key])) ||
+      roi.x < 0 ||
+      roi.y < 0 ||
+      roi.width <= 0 ||
+      roi.height <= 0 ||
+      roi.x + roi.width > header.source_width ||
+      roi.y + roi.height > header.source_height
+    ) {
+      throw new Error("The processed ROI is invalid.");
+    }
+  };
+
+  const validateMetrics = (metrics) => {
+    if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
+      throw new Error("The processed metrics are invalid.");
+    }
+    const names = Object.keys(metrics);
+    if (names.length > maxMetadataMetrics) {
+      throw new Error("The processed metrics are too large.");
+    }
+    for (const value of Object.values(metrics)) {
+      if (
+        value !== null &&
+        (typeof value !== "number" || !Number.isFinite(value) || typeof value === "boolean")
+      ) {
+        throw new Error("The processed metrics are invalid.");
+      }
+    }
+  };
+
   const validateHeader = (header) => {
     if (
       !header ||
+      typeof header !== "object" ||
       header.type !== "frame_header" ||
       header.message_type !== "frame_header" ||
       header.protocol_version !== 1 ||
+      !Number.isInteger(header.generation_number) ||
+      header.generation_number < 0 ||
+      typeof header.camera_id !== "string" ||
+      header.camera_id.length === 0 ||
+      typeof header.model_id !== "string" ||
+      header.model_id.length === 0 ||
+      typeof header.model_checksum !== "string" ||
+      header.model_checksum.length === 0 ||
+      typeof header.capture_session_id !== "string" ||
+      header.capture_session_id.length === 0 ||
       typeof header.stream_epoch !== "string" ||
+      header.stream_epoch.length === 0 ||
       !Number.isInteger(header.frame_sequence) ||
       !Number.isInteger(header.jpeg_byte_count) ||
       header.frame_sequence < 0 ||
@@ -216,6 +320,110 @@
     ) {
       throw new Error("The processed display protocol is invalid.");
     }
+    for (const name of ["source_width", "source_height", "jpeg_width", "jpeg_height"]) {
+      if (
+        !Number.isInteger(header[name]) ||
+        header[name] <= 0 ||
+        header[name] > maxDimension
+      ) {
+        throw new Error("The processed frame geometry is invalid.");
+      }
+    }
+    if (
+      typeof header.captured_at_utc !== "string" ||
+      header.captured_at_utc.length === 0 ||
+      header.capture_timestamp !== header.captured_at_utc
+    ) {
+      throw new Error("The processed frame timestamp is invalid.");
+    }
+    if (
+      typeof header.confidence_threshold !== "number" ||
+      !Number.isFinite(header.confidence_threshold) ||
+      header.confidence_threshold < 0 ||
+      header.confidence_threshold > 1 ||
+      header.threshold !== header.confidence_threshold
+    ) {
+      throw new Error("The processed frame threshold is invalid.");
+    }
+    if (!Array.isArray(header.detections) || header.detections.length > maxDetections) {
+      throw new Error("The processed detections are invalid.");
+    }
+    if (JSON.stringify(header.roi) !== JSON.stringify(header.region_of_interest)) {
+      throw new Error("The processed ROI pairing is invalid.");
+    }
+    validateRoi(header.region_of_interest, header);
+    validateMetrics(header.metrics);
+    for (const detection of header.detections) {
+      validateDetection(detection, header);
+    }
+  };
+
+  const protocolError = (error, socket = displaySocket) => {
+    pendingHeader = null;
+    setMessage(error, "attention");
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.close(1008, "invalid protocol");
+    }
+  };
+
+  const acceptProvenance = (header) => {
+    const provenance = {
+      generation: header.generation_number,
+      epoch: header.stream_epoch,
+      captureSession: header.capture_session_id,
+    };
+    if (
+      retiredProvenances.some(
+        (retired) =>
+          retired.generation === provenance.generation &&
+          retired.epoch === provenance.epoch &&
+          retired.captureSession === provenance.captureSession,
+      )
+    ) {
+      return false;
+    }
+    if (activeEpoch === null) {
+      activeGeneration = provenance.generation;
+      activeEpoch = provenance.epoch;
+      activeCaptureSession = provenance.captureSession;
+      lastSequence = -1;
+      return true;
+    }
+    if (
+      activeGeneration === provenance.generation &&
+      activeEpoch === provenance.epoch &&
+      activeCaptureSession === provenance.captureSession
+    ) {
+      return true;
+    }
+    if (provenance.generation < activeGeneration) {
+      return false;
+    }
+    if (
+      provenance.epoch === activeEpoch ||
+      provenance.captureSession === activeCaptureSession
+    ) {
+      throw new Error("The processed epoch and capture session boundary is invalid.");
+    }
+    if (
+      provenance.generation === activeGeneration ||
+      provenance.generation > activeGeneration
+    ) {
+      retiredProvenances.push({
+        generation: activeGeneration,
+        epoch: activeEpoch,
+        captureSession: activeCaptureSession,
+      });
+      while (retiredProvenances.length > 16) {
+        retiredProvenances.shift();
+      }
+      activeGeneration = provenance.generation;
+      activeEpoch = provenance.epoch;
+      activeCaptureSession = provenance.captureSession;
+      lastSequence = -1;
+      return true;
+    }
+    return false;
   };
 
   const closeDisplaySocket = () => {
@@ -228,56 +436,65 @@
 
   const openDisplaySocket = () => {
     closeDisplaySocket();
+    activeGeneration = null;
     activeEpoch = null;
+    activeCaptureSession = null;
+    retiredProvenances.length = 0;
     lastSequence = -1;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    displaySocket = new WebSocket(
+    const socket = new WebSocket(
       `${protocol}//${window.location.host}/api/v1/live/ws`,
     );
-    displaySocket.binaryType = "arraybuffer";
-    displaySocket.onmessage = (event) => {
+    displaySocket = socket;
+    socket.binaryType = "arraybuffer";
+    socket.onmessage = (event) => {
       if (typeof event.data === "string") {
         let header;
         try {
           header = JSON.parse(event.data);
           if (header.type === "state") {
-            pendingHeader = null;
+            if (pendingHeader !== null) {
+              throw new Error("A state message interrupted a display unit.");
+            }
+            validateState(header);
             setProcessedState(header.state || "stopped");
             return;
           }
+          if (pendingHeader !== null) {
+            throw new Error("Two display headers arrived without a JPEG.");
+          }
           validateHeader(header);
         } catch (error) {
-          pendingHeader = null;
-          setMessage(error.message, "attention");
-          displaySocket.close(1008, "invalid protocol");
+          protocolError(error.message, socket);
           return;
         }
         pendingHeader = header;
         return;
       }
       if (!pendingHeader) {
+        protocolError("A binary message arrived without a display header.", socket);
         return;
       }
       const header = pendingHeader;
       pendingHeader = null;
       if (event.data.byteLength !== header.jpeg_byte_count) {
-        setMessage("The processed JPEG did not match its metadata.", "attention");
-        displaySocket.close(1008, "invalid frame pairing");
+        protocolError("The processed JPEG did not match its metadata.", socket);
         return;
       }
-      if (activeEpoch !== null && activeEpoch !== header.stream_epoch) {
+      let currentProvenance;
+      try {
+        currentProvenance = acceptProvenance(header);
+      } catch (error) {
+        protocolError(error.message, socket);
         return;
       }
-      if (activeEpoch !== header.stream_epoch) {
-        activeEpoch = header.stream_epoch;
-        lastSequence = -1;
+      if (!currentProvenance) {
+        return;
       }
       if (header.frame_sequence <= lastSequence) {
         return;
       }
       lastSequence = header.frame_sequence;
-      currentHeader = header;
-      updateProcessedMetrics(header);
       const blob = new Blob([event.data], { type: "image/jpeg" });
       const objectUrl = URL.createObjectURL(blob);
       const previousObjectUrl = currentObjectUrl;
@@ -290,6 +507,16 @@
         if (previousObjectUrl) {
           URL.revokeObjectURL(previousObjectUrl);
         }
+        if (
+          processedPreview.naturalWidth !== header.jpeg_width ||
+          processedPreview.naturalHeight !== header.jpeg_height
+        ) {
+          protocolError("The processed JPEG geometry does not match its metadata.", socket);
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        currentHeader = header;
+        updateProcessedMetrics(header);
         processedEmpty.hidden = true;
         processedFrame.hidden = false;
         drawOverlay();
@@ -297,15 +524,17 @@
       };
       processedPreview.onerror = () => {
         URL.revokeObjectURL(objectUrl);
-        setMessage("The processed JPEG could not be displayed.", "attention");
+        protocolError("The processed JPEG could not be displayed.", socket);
       };
       processedPreview.src = objectUrl;
     };
-    displaySocket.onerror = () => {
+    socket.onerror = () => {
       setMessage("The synchronized processed preview is unavailable.", "attention");
     };
-    displaySocket.onclose = () => {
-      displaySocket = null;
+    socket.onclose = () => {
+      if (displaySocket === socket) {
+        displaySocket = null;
+      }
       pendingHeader = null;
     };
   };

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import UTC, datetime
 from io import BytesIO
@@ -16,6 +17,7 @@ from open_licenseplate.live import (
     LIVE_PROTOCOL_VERSION,
     DisplayMessageTooLarge,
     DisplayProtocolError,
+    DisplayShutdownError,
     ProcessedDisplayBroker,
     ProcessedDisplayService,
     ProcessedDisplayUnit,
@@ -127,7 +129,9 @@ def test_processed_display_protocol_rejects_bad_pair_and_oversized_jpeg() -> Non
         metadata=bad_metadata,
         metadata_text=json.dumps(bad_metadata, separators=(",", ":")),
         jpeg=unit.jpeg,
+        generation_number=unit.generation_number,
         stream_epoch=unit.stream_epoch,
+        capture_session_id=unit.capture_session_id,
         frame_sequence=unit.frame_sequence,
     )
     with pytest.raises(DisplayProtocolError, match="sequence pairing"):
@@ -137,11 +141,30 @@ def test_processed_display_protocol_rejects_bad_pair_and_oversized_jpeg() -> Non
         metadata=unit.metadata,
         metadata_text=unit.metadata_text,
         jpeg=b"x" * (4 * 1024 * 1024 + 1),
+        generation_number=unit.generation_number,
         stream_epoch=unit.stream_epoch,
+        capture_session_id=unit.capture_session_id,
         frame_sequence=unit.frame_sequence,
     )
     with pytest.raises(DisplayMessageTooLarge):
         validate_display_unit(oversized)
+
+
+def test_processed_display_protocol_rejects_detection_provenance_mismatch() -> None:
+    unit = build_display_unit(_candidate(1), jpeg=b"jpeg", jpeg_width=8, jpeg_height=6)
+    bad_metadata = json.loads(unit.metadata_text)
+    bad_metadata["detections"][0]["frame_sequence"] = 2
+    bad_unit = ProcessedDisplayUnit(
+        metadata=bad_metadata,
+        metadata_text=json.dumps(bad_metadata, separators=(",", ":")),
+        jpeg=unit.jpeg,
+        generation_number=unit.generation_number,
+        stream_epoch=unit.stream_epoch,
+        capture_session_id=unit.capture_session_id,
+        frame_sequence=unit.frame_sequence,
+    )
+    with pytest.raises(DisplayProtocolError, match="detection is invalid"):
+        validate_display_unit(bad_unit)
 
 
 def test_processed_display_service_discards_stale_epoch_data() -> None:
@@ -190,3 +213,33 @@ def test_processed_display_encoder_rate_is_bounded_and_shutdown_is_clean() -> No
         later - earlier for earlier, later in zip(encoded_at, encoded_at[1:], strict=False)
     ]
     assert min(intervals) >= 0.15
+
+
+def test_processed_display_service_reports_and_recovers_from_stuck_encoder() -> None:
+    encoder_started = threading.Event()
+    release_encoder = threading.Event()
+
+    def stuck_encoder(_frame: VideoFrame) -> bytes:
+        encoder_started.set()
+        release_encoder.wait()
+        return _jpeg()
+
+    service = ProcessedDisplayService(max_fps=60, encoder=stuck_encoder)
+    service.start_generation(1)
+    subscription = service.subscribe()
+    assert subscription is not None
+    service.set_provenance(1, "epoch-1", "session-1")
+    assert service.submit(_candidate(1, "epoch-1"))
+    assert encoder_started.wait(1)
+
+    with pytest.raises(DisplayShutdownError, match="did not stop"):
+        service.stop_generation(reason="shutdown", timeout=0.01)
+    thread = service.encoder_thread
+    assert thread is not None
+    assert thread.is_alive()
+    assert service.shutdown_failure == "processed display encoder did not stop before the deadline"
+    assert subscription.closed
+
+    release_encoder.set()
+    service.stop_generation(reason="shutdown", timeout=1)
+    assert not thread.is_alive()

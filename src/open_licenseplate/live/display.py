@@ -6,7 +6,6 @@ import json
 import threading
 import time
 from collections.abc import Callable, Mapping
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
@@ -25,6 +24,7 @@ MAX_DISPLAY_JPEG_BYTES = 4 * 1024 * 1024
 MAX_DISPLAY_DIMENSION = 8192
 MAX_DISPLAY_DETECTIONS = 256
 MAX_DISPLAY_SUBSCRIBERS = 16
+MAX_RETIRED_PROVENANCES = 16
 
 
 class DisplayProtocolError(ValueError):
@@ -35,6 +35,10 @@ class DisplayMessageTooLarge(DisplayProtocolError):
     """Raised when a metadata or JPEG message exceeds its safe limit."""
 
 
+class DisplayShutdownError(RuntimeError):
+    """Raised when the processed display worker misses its stop deadline."""
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessedDisplayUnit:
     """One atomic JSON metadata and binary JPEG pair."""
@@ -42,7 +46,9 @@ class ProcessedDisplayUnit:
     metadata: Mapping[str, Any]
     metadata_text: str
     jpeg: bytes
+    generation_number: int
     stream_epoch: str
+    capture_session_id: str
     frame_sequence: int
 
     @property
@@ -329,7 +335,7 @@ class ProcessedDisplayEncoder:
         *,
         max_fps: float = 10.0,
         encoder: Callable[[VideoFrame], bytes] = encode_jpeg,
-        current_identity: Callable[[], tuple[int, str | None] | None] | None = None,
+        current_identity: Callable[[], tuple[int, str | None, str | None] | None] | None = None,
         on_error: Callable[[], None] | None = None,
     ) -> None:
         if not 0 < max_fps <= 60:
@@ -361,9 +367,13 @@ class ProcessedDisplayEncoder:
         self._candidate_broker.close()
         thread = self._thread
         if thread is not None:
+            if thread is threading.current_thread():
+                return
             thread.join(max(0.0, timeout))
             if thread.is_alive():
-                raise RuntimeError("processed display encoder did not stop before the deadline")
+                raise DisplayShutdownError(
+                    "processed display encoder did not stop before the deadline"
+                )
 
     @property
     def thread(self) -> threading.Thread | None:
@@ -405,7 +415,11 @@ class ProcessedDisplayEncoder:
         if self._current_identity is None:
             return True
         identity = self._current_identity()
-        return identity == (candidate.generation_number, candidate.stream_epoch)
+        return identity is not None and (
+            identity[0] == candidate.generation_number
+            and identity[1] == candidate.stream_epoch
+            and (identity[2] is None or identity[2] == candidate.capture_session_id)
+        )
 
 
 class ProcessedDisplayService:
@@ -424,9 +438,11 @@ class ProcessedDisplayService:
         self._lock = threading.RLock()
         self._generation_number: int | None = None
         self._stream_epoch: str | None = None
+        self._capture_session_id: str | None = None
         self._candidate_broker: _CandidateBroker | None = None
         self._output_broker: ProcessedDisplayBroker | None = None
         self._encoder: ProcessedDisplayEncoder | None = None
+        self._shutdown_failure: str | None = None
 
     def start_generation(self, generation_number: int) -> None:
         """Create a fresh broker pair for a pipeline generation."""
@@ -444,9 +460,11 @@ class ProcessedDisplayService:
         with self._lock:
             self._generation_number = generation_number
             self._stream_epoch = None
+            self._capture_session_id = None
             self._candidate_broker = candidate_broker
             self._output_broker = output_broker
             self._encoder = encoder
+            self._shutdown_failure = None
         encoder.start()
 
     def set_epoch(self, generation_number: int, stream_epoch: str) -> None:
@@ -455,6 +473,23 @@ class ProcessedDisplayService:
             if self._generation_number != generation_number:
                 return
             self._stream_epoch = stream_epoch
+            self._capture_session_id = None
+            candidate_broker = self._candidate_broker
+        if candidate_broker is not None:
+            candidate_broker.clear()
+
+    def set_provenance(
+        self,
+        generation_number: int,
+        stream_epoch: str,
+        capture_session_id: str,
+    ) -> None:
+        """Set the current epoch and capture session as one identity."""
+        with self._lock:
+            if self._generation_number != generation_number:
+                return
+            self._stream_epoch = stream_epoch
+            self._capture_session_id = capture_session_id
             candidate_broker = self._candidate_broker
         if candidate_broker is not None:
             candidate_broker.clear()
@@ -464,7 +499,10 @@ class ProcessedDisplayService:
         with self._lock:
             if self._generation_number != candidate.generation_number:
                 return False
-            if self._stream_epoch != candidate.stream_epoch:
+            if self._stream_epoch != candidate.stream_epoch or (
+                self._capture_session_id is not None
+                and self._capture_session_id != candidate.capture_session_id
+            ):
                 return False
             broker = self._candidate_broker
         return broker is not None and broker.put(candidate)
@@ -483,7 +521,7 @@ class ProcessedDisplayService:
             return DisplayBrokerMetrics(0, 0, 0, 0, True)
         return broker.metrics()
 
-    def stop_generation(self, *, reason: str = "stopped") -> None:
+    def stop_generation(self, *, reason: str = "stopped", timeout: float = 5.0) -> None:
         """Stop encoding and close subscribers for the current generation."""
         with self._lock:
             candidate_broker = self._candidate_broker
@@ -491,14 +529,23 @@ class ProcessedDisplayService:
             encoder = self._encoder
             self._generation_number = None
             self._stream_epoch = None
+            self._capture_session_id = None
             self._candidate_broker = None
             self._output_broker = None
-            self._encoder = None
         if output_broker is not None:
             output_broker.close(reason)
         if encoder is not None:
-            with suppress(RuntimeError):
-                encoder.stop()
+            try:
+                encoder.stop(timeout=timeout)
+            except DisplayShutdownError as error:
+                with self._lock:
+                    self._encoder = encoder
+                    self._shutdown_failure = str(error)
+                raise
+            else:
+                with self._lock:
+                    if self._encoder is encoder:
+                        self._encoder = None
         elif candidate_broker is not None:
             candidate_broker.close()
 
@@ -506,11 +553,27 @@ class ProcessedDisplayService:
         """Close the service during application shutdown."""
         self.stop_generation(reason="shutdown")
 
-    def _identity(self) -> tuple[int, str | None] | None:
+    @property
+    def encoder_thread(self) -> threading.Thread | None:
+        """Return the encoder thread for bounded shutdown inspection."""
+        with self._lock:
+            return None if self._encoder is None else self._encoder.thread
+
+    @property
+    def shutdown_failure(self) -> str | None:
+        """Return a safe shutdown failure, if the worker missed its deadline."""
+        with self._lock:
+            return self._shutdown_failure
+
+    def _identity(self) -> tuple[int, str | None, str | None] | None:
         with self._lock:
             if self._generation_number is None:
                 return None
-            return self._generation_number, self._stream_epoch
+            return (
+                self._generation_number,
+                self._stream_epoch,
+                self._capture_session_id,
+            )
 
 
 def build_display_candidate(
@@ -568,6 +631,8 @@ def build_display_unit(
     jpeg_height: int,
 ) -> ProcessedDisplayUnit:
     """Build and validate one atomic metadata/JPEG pair."""
+    if not isinstance(jpeg, bytes) or not jpeg:
+        raise DisplayProtocolError("processed JPEG is invalid")
     if len(jpeg) > MAX_DISPLAY_JPEG_BYTES:
         raise DisplayMessageTooLarge("processed JPEG is too large")
     if not candidate.stream_epoch or candidate.frame_sequence < 0:
@@ -583,6 +648,7 @@ def build_display_unit(
         "type": "frame_header",
         "message_type": "frame_header",
         "protocol_version": LIVE_PROTOCOL_VERSION,
+        "generation_number": candidate.generation_number,
         "camera_id": candidate.camera_id,
         "model_id": candidate.model_id,
         "model_checksum": candidate.model_checksum,
@@ -611,7 +677,9 @@ def build_display_unit(
         metadata=metadata,
         metadata_text=metadata_text,
         jpeg=bytes(jpeg),
+        generation_number=candidate.generation_number,
         stream_epoch=candidate.stream_epoch,
+        capture_session_id=candidate.capture_session_id,
         frame_sequence=candidate.frame_sequence,
     )
     validate_display_unit(unit)
@@ -626,6 +694,8 @@ def validate_display_unit(unit: ProcessedDisplayUnit) -> None:
         raise DisplayMessageTooLarge("processed frame metadata is too large")
     if not isinstance(unit.jpeg, bytes):
         raise DisplayProtocolError("processed JPEG is invalid")
+    if not unit.jpeg:
+        raise DisplayProtocolError("processed JPEG is invalid")
     if len(unit.jpeg) > MAX_DISPLAY_JPEG_BYTES:
         raise DisplayMessageTooLarge("processed JPEG is too large")
     try:
@@ -638,6 +708,12 @@ def validate_display_unit(unit: ProcessedDisplayUnit) -> None:
         raise DisplayProtocolError("unsupported live WebSocket protocol")
     if decoded.get("type") != "frame_header" or decoded.get("message_type") != "frame_header":
         raise DisplayProtocolError("processed frame message type is invalid")
+    if (
+        type(decoded.get("generation_number")) is not int
+        or decoded["generation_number"] != unit.generation_number
+        or decoded["generation_number"] < 0
+    ):
+        raise DisplayProtocolError("processed frame generation pairing is invalid")
     for name in (
         "camera_id",
         "model_id",
@@ -649,8 +725,18 @@ def validate_display_unit(unit: ProcessedDisplayUnit) -> None:
             raise DisplayProtocolError("processed frame provenance is invalid")
     if decoded.get("capture_timestamp") != decoded.get("captured_at_utc"):
         raise DisplayProtocolError("processed frame timestamp pairing is invalid")
-    if decoded.get("stream_epoch") != unit.stream_epoch:
+    if (
+        not isinstance(decoded.get("stream_epoch"), str)
+        or not decoded["stream_epoch"]
+        or decoded.get("stream_epoch") != unit.stream_epoch
+    ):
         raise DisplayProtocolError("processed frame epoch pairing is invalid")
+    if (
+        not isinstance(decoded.get("capture_session_id"), str)
+        or not decoded["capture_session_id"]
+        or decoded.get("capture_session_id") != unit.capture_session_id
+    ):
+        raise DisplayProtocolError("processed frame capture session pairing is invalid")
     if (
         type(decoded.get("frame_sequence")) is not int
         or decoded["frame_sequence"] < 0
@@ -676,13 +762,24 @@ def validate_display_unit(unit: ProcessedDisplayUnit) -> None:
         raise DisplayProtocolError("processed frame threshold is invalid")
     if decoded.get("roi") != decoded.get("region_of_interest"):
         raise DisplayProtocolError("processed frame ROI pairing is invalid")
-    _validate_roi(decoded.get("region_of_interest"))
+    _validate_roi(
+        decoded.get("region_of_interest"),
+        source_width=decoded["source_width"],
+        source_height=decoded["source_height"],
+    )
     _validate_metrics(decoded.get("metrics"))
     detections = decoded.get("detections")
     if not isinstance(detections, list) or len(detections) > MAX_DISPLAY_DETECTIONS:
         raise DisplayProtocolError("processed frame detections are invalid")
     for detection in detections:
-        _validate_detection(detection, decoded["source_width"], decoded["source_height"])
+        _validate_detection(
+            detection,
+            source_width=decoded["source_width"],
+            source_height=decoded["source_height"],
+            frame_sequence=decoded["frame_sequence"],
+            model_id=decoded["model_id"],
+            model_checksum=decoded["model_checksum"],
+        )
 
 
 def jpeg_dimensions(jpeg: bytes) -> tuple[int, int]:
@@ -716,18 +813,33 @@ def _detection_payload(detection: Detection) -> dict[str, Any]:
     }
 
 
-def _validate_detection(value: object, source_width: int, source_height: int) -> None:
+def _validate_detection(
+    value: object,
+    *,
+    source_width: int,
+    source_height: int,
+    frame_sequence: int,
+    model_id: str,
+    model_checksum: str,
+) -> None:
     if not isinstance(value, dict):
         raise DisplayProtocolError("processed detection is invalid")
     box = value.get("box_xyxy")
     confidence = value.get("confidence")
     label = value.get("label")
+    detection_frame_sequence = value.get("frame_sequence")
+    detection_model_id = value.get("model_id")
+    detection_model_checksum = value.get("model_checksum")
     if (
         not isinstance(box, list)
         or len(box) != 4
         or not isinstance(label, str)
         or not label
         or not isinstance(confidence, (int, float))
+        or type(detection_frame_sequence) is not int
+        or detection_frame_sequence != frame_sequence
+        or detection_model_id != model_id
+        or detection_model_checksum != model_checksum
     ):
         raise DisplayProtocolError("processed detection is invalid")
     try:
@@ -744,14 +856,21 @@ def _validate_detection(value: object, source_width: int, source_height: int) ->
         raise DisplayProtocolError("processed detection geometry is invalid")
 
 
-def _validate_roi(value: object) -> None:
+def _validate_roi(value: object, *, source_width: int, source_height: int) -> None:
     if value is None:
         return
     if not isinstance(value, dict) or set(value) != {"x", "y", "width", "height"}:
         raise DisplayProtocolError("processed frame ROI is invalid")
     if any(type(value[key]) is not int for key in value):
         raise DisplayProtocolError("processed frame ROI is invalid")
-    if value["x"] < 0 or value["y"] < 0 or value["width"] <= 0 or value["height"] <= 0:
+    if (
+        value["x"] < 0
+        or value["y"] < 0
+        or value["width"] <= 0
+        or value["height"] <= 0
+        or value["x"] + value["width"] > source_width
+        or value["y"] + value["height"] > source_height
+    ):
         raise DisplayProtocolError("processed frame ROI is invalid")
 
 
@@ -798,7 +917,9 @@ __all__ = [
     "DisplayBrokerMetrics",
     "DisplayMessageTooLarge",
     "DisplayProtocolError",
+    "DisplayShutdownError",
     "LIVE_PROTOCOL_VERSION",
+    "MAX_RETIRED_PROVENANCES",
     "MAX_DISPLAY_JPEG_BYTES",
     "MAX_DISPLAY_METADATA_BYTES",
     "ProcessedDisplayBroker",

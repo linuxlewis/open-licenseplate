@@ -9,7 +9,13 @@ import numpy as np
 import pytest
 
 from open_licenseplate.cameras.service import prepare_camera_config
-from open_licenseplate.capture import CameraRuntime, FakeFrameSource, LatestFrameBroker
+from open_licenseplate.capture import (
+    CameraRuntime,
+    FakeFrameSource,
+    LatestFrameBroker,
+    ReconnectBackoff,
+    make_preview_frame,
+)
 from open_licenseplate.inference import ModelDescriptor
 from open_licenseplate.inference.backends import FakeBackend
 from open_licenseplate.live import (
@@ -229,6 +235,88 @@ def test_live_pipeline_replaces_old_frames_during_slow_inference() -> None:
     assert processed.metrics.capture_age_ms is not None
     assert processed.metrics.end_to_end_ms is not None
     coordinator.stop()
+
+
+def test_live_pipeline_publishes_new_epoch_after_reconnect_without_old_units() -> None:
+    release_failure = threading.Event()
+    sources: list[FakeFrameSource] = []
+    factory_calls = 0
+
+    class GateBeforeFailureSource(FakeFrameSource):
+        def read(self) -> Any:
+            if self._frame_index >= 1:
+                release_failure.wait(2)
+            return super().read()
+
+    def source_factory(camera: Any, camera_id: str) -> FakeFrameSource:
+        nonlocal factory_calls
+        del camera
+        if factory_calls == 0:
+            source = GateBeforeFailureSource(
+                (make_preview_frame(40),),
+                camera_id=camera_id,
+                fail_at=1,
+                read_error="controlled reconnect",
+            )
+        else:
+            source = FakeFrameSource(
+                (make_preview_frame(80),),
+                camera_id=camera_id,
+                repeat=True,
+                read_interval_seconds=0.001,
+            )
+        factory_calls += 1
+        sources.append(source)
+        return source
+
+    runtime = CameraRuntime(
+        source_factory,
+        backoff=ReconnectBackoff(
+            base_delay_seconds=0.01,
+            cap_seconds=0.01,
+            jitter_ratio=0,
+            random_value=lambda: 0.5,
+        ),
+        stable_stream_seconds=0.1,
+        poll_interval_seconds=0.001,
+        degraded_hold_seconds=0.001,
+    )
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: FakeBackend(output_factory=_outputs),
+        poll_interval_seconds=0.001,
+        epoch_factory=iter(("epoch-1", "epoch-2")).__next__,
+    )
+    try:
+        coordinator.start("camera-1", _camera(), _descriptor())
+        subscription = coordinator.subscribe_display()
+        assert subscription is not None
+        first = subscription.get(timeout=5)
+        assert first is not None
+        assert first.stream_epoch == "epoch-1"
+        assert first.capture_session_id == sources[0].capture_session_id
+        release_failure.set()
+        deadline = time.monotonic() + 5
+        second = None
+        while time.monotonic() < deadline:
+            current = subscription.get(timeout=0.25)
+            if current is None:
+                continue
+            if current.stream_epoch == "epoch-2":
+                second = current
+                break
+            assert current.stream_epoch == "epoch-1"
+        assert second is not None
+        assert first.capture_session_id != second.capture_session_id
+        assert second.frame_sequence >= 1
+        for _ in range(2):
+            current = subscription.get(timeout=1)
+            assert current is not None
+            assert current.stream_epoch == "epoch-2"
+            assert current.capture_session_id == second.capture_session_id
+        subscription.close()
+    finally:
+        coordinator.close()
 
 
 def test_end_to_end_metric_includes_capture_wait_and_slow_prediction() -> None:

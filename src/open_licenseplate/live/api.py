@@ -195,7 +195,25 @@ async def live_websocket(websocket: WebSocket) -> None:
                 await _send_state_and_close(websocket, "failed", code=1008)
                 return
 
-            if status.stream_epoch != unit.stream_epoch:
+            current_status = await asyncio.to_thread(pipeline.status)
+            if current_status.state in {"stopped", "stopping"}:
+                await _send_state_and_close(websocket, current_status.state, code=1000)
+                return
+            if current_status.state == "failed":
+                await _send_state_and_close(
+                    websocket,
+                    "failed",
+                    code=1011,
+                    failure=current_status.failure,
+                )
+                return
+            if current_status.state != "running":
+                continue
+            if (
+                current_status.generation_number != unit.generation_number
+                or current_status.stream_epoch != unit.stream_epoch
+                or current_status.capture_session_id != unit.capture_session_id
+            ):
                 continue
             if last_epoch != unit.stream_epoch:
                 last_epoch = unit.stream_epoch

@@ -37,6 +37,7 @@ from ..inference import (
     StillImage,
 )
 from .display import (
+    DisplayShutdownError,
     ProcessedDisplayService,
     ProcessedDisplaySubscription,
     build_display_candidate,
@@ -217,6 +218,7 @@ class LivePipelineStatus:
     state: PipelineState
     camera_id: str | None
     model_id: str | None
+    generation_number: int | None
     model_checksum: str | None
     capture_session_id: str | None
     epoch: str | None
@@ -245,6 +247,7 @@ class LivePipelineStatus:
             "lifecycle_state": self.state,
             "camera_id": self.camera_id,
             "model_id": self.model_id,
+            "generation_number": self.generation_number,
             "model_checksum": self.model_checksum,
             "capture_session_id": self.capture_session_id,
             "epoch": self.epoch,
@@ -460,7 +463,7 @@ class LivePipelineCoordinator:
                 thread.start()
                 return self._status_locked()
         except Exception:
-            self._display.stop_generation(reason="failed")
+            self._stop_display(reason="failed")
             with suppress(Exception):
                 self.camera_runtime.stop(camera_id, timeout=self.stop_timeout_seconds)
             with self._condition:
@@ -484,7 +487,12 @@ class LivePipelineCoordinator:
         with self._control_lock:
             return self._stop(timeout=timeout)
 
-    def _stop(self, *, timeout: float | None = None) -> LivePipelineStatus:
+    def _stop(
+        self,
+        *,
+        timeout: float | None = None,
+        skip_display: bool = False,
+    ) -> LivePipelineStatus:
         """Stop inference, then capture, within one bounded deadline."""
         wait_timeout = self.stop_timeout_seconds if timeout is None else max(0.0, timeout)
         started = time.monotonic()
@@ -503,15 +511,18 @@ class LivePipelineCoordinator:
                 subscription = self._subscription
                 result = None
         if result is not None:
-            if generation is not None:
-                self._display.stop_generation(reason="stopped")
-            if generation is not None and not self._stop_camera(
+            display_ok = skip_display or self._stop_display(reason="stopped")
+            camera_ok = generation is None or self._stop_camera(
                 generation.camera_id,
                 wait_timeout,
-            ):
-                self._display.stop_generation(reason="failed")
+            )
+            if not camera_ok:
                 self._record_stop_failure()
                 raise LivePipelineShutdownError("camera resources did not stop before the deadline")
+            if not display_ok:
+                raise LivePipelineShutdownError(
+                    "processed display resources did not stop before the deadline"
+                )
             return result
 
         if subscription is not None:
@@ -521,7 +532,8 @@ class LivePipelineCoordinator:
         elapsed = time.monotonic() - started
         remaining = max(0.0, wait_timeout - elapsed)
         if thread.is_alive():
-            self._display.stop_generation(reason="failed")
+            if not skip_display:
+                self._stop_display(reason="failed")
             with self._condition:
                 self._record_failure_locked(
                     LivePipelineFailure(
@@ -537,27 +549,32 @@ class LivePipelineCoordinator:
             generation.camera_id,
             remaining,
         ):
-            self._display.stop_generation(reason="failed")
+            if not skip_display:
+                self._stop_display(reason="failed")
             self._record_stop_failure()
             raise LivePipelineShutdownError("camera resources did not stop before the deadline")
         with self._condition:
             if self._state == "stopping":
                 self._transition_locked("stopped")
-        self._display.stop_generation(reason="stopped")
+        display_ok = skip_display or self._stop_display(reason="stopped")
+        if not display_ok:
+            raise LivePipelineShutdownError(
+                "processed display resources did not stop before the deadline"
+            )
         with self._condition:
             return self._status_locked()
 
     def close(self) -> None:
         """Release the live pipeline during application shutdown."""
         with self._control_lock:
-            self._display.stop_generation(reason="shutdown")
+            self._stop_display(reason="shutdown")
             try:
-                self._stop()
+                self._stop(skip_display=True)
             except LivePipelineShutdownError:
                 # The daemon worker keeps ownership until its current prediction ends.
                 pass
             finally:
-                self._display.close()
+                self._stop_display(reason="shutdown")
 
     def subscribe_display(self) -> ProcessedDisplaySubscription | None:
         """Return a capacity-one processed display subscription."""
@@ -639,7 +656,11 @@ class LivePipelineCoordinator:
                             if self._capture_session_id != frame.capture_session_id:
                                 self._capture_session_id = frame.capture_session_id
                                 self._epoch = self.epoch_factory()
-                                self._display.set_epoch(generation.number, self._epoch)
+                                self._display.set_provenance(
+                                    generation.number,
+                                    self._epoch,
+                                    frame.capture_session_id,
+                                )
                             self._frame_sequence = None
                 if last_sequence is not None and frame.sequence <= last_sequence:
                     with self._condition:
@@ -847,6 +868,27 @@ class LivePipelineCoordinator:
             )
             self._transition_locked("failed")
 
+    def _stop_display(self, *, reason: str) -> bool:
+        try:
+            self._display.stop_generation(
+                reason=reason,
+                timeout=self.stop_timeout_seconds,
+            )
+        except DisplayShutdownError:
+            self._record_display_shutdown_failure()
+            return False
+        return True
+
+    def _record_display_shutdown_failure(self) -> None:
+        with self._condition:
+            self._record_failure_locked(
+                LivePipelineFailure(
+                    "shutdown",
+                    "processed display encoder did not stop before the deadline",
+                )
+            )
+            self._transition_locked("failed")
+
     def _set_state(self, generation: _PipelineGeneration, state: PipelineState) -> None:
         with self._condition:
             if self._is_current_locked(generation) and self._state not in {"stopping", "failed"}:
@@ -861,7 +903,7 @@ class LivePipelineCoordinator:
             self._transition_locked("failed")
             should_close_display = True
         if should_close_display:
-            self._display.stop_generation(reason="failed")
+            self._stop_display(reason="failed")
         return True
 
     def _display_failed(self) -> None:
@@ -937,6 +979,7 @@ class LivePipelineCoordinator:
             state=self._state,
             camera_id=camera_id,
             model_id=None if generation is None else generation.descriptor.model_id,
+            generation_number=None if generation is None else generation.number,
             model_checksum=self._model_checksum,
             capture_session_id=self._capture_session_id,
             epoch=self._epoch,

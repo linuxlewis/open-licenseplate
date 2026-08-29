@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import socket
 import threading
 import time
 from collections.abc import Iterator
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import httpx
 import numpy as np
 import pytest
 import uvicorn
+from PIL import Image
 
 from model_helpers import create_model_fixture
 from open_licenseplate.app import create_app
@@ -169,8 +172,8 @@ def fake_live_browser_base_url(tmp_path: Path) -> Iterator[str]:
 
     def outputs(_prepared: Any) -> dict[str, Any]:
         return {
-            "coordinates": np.array([[0, 140, 640, 500]], dtype=np.float32),
-            "confidence": np.array([0.9], dtype=np.float32),
+            "coordinates": np.array([[100, 240, 500, 440]], dtype=np.float32),
+            "confidence": np.array([0.99], dtype=np.float32),
         }
 
     backend = FakeBackend(output_factory=outputs)
@@ -337,6 +340,39 @@ def test_browser_can_run_detection_change_threshold_resize_overlay_and_stop(
     assert canvas_box is not None
     assert abs(image_box["width"] - canvas_box["width"]) < 1
     assert abs(image_box["height"] - canvas_box["height"]) < 1
+    box_check = page.evaluate(
+        """() => {
+          const image = document.querySelector("#live-processed-preview");
+          const canvas = document.querySelector("#live-overlay");
+          const bounds = image.getBoundingClientRect();
+          const ratio = window.devicePixelRatio || 1;
+          const context = canvas.getContext("2d");
+          const points = [
+            [bounds.width * 100 / 640, bounds.height * 200 / 360],
+            [bounds.width * 500 / 640, bounds.height * 200 / 360],
+            [bounds.width * 300 / 640, bounds.height * 300 / 360],
+          ];
+          const hasOverlayColor = (x, y) => {
+            const centerX = Math.round(x * ratio);
+            const centerY = Math.round(y * ratio);
+            for (let dx = -4; dx <= 4; dx += 1) {
+              for (let dy = -4; dy <= 4; dy += 1) {
+                const pixel = context.getImageData(centerX + dx, centerY + dy, 1, 1).data;
+                if (pixel[0] > 180 && pixel[1] > 140 && pixel[2] < 160 && pixel[3] > 0) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          };
+          return {
+            expected: points,
+            found: points.map(([x, y]) => hasOverlayColor(x, y)),
+          };
+        }"""
+    )
+    assert box_check["expected"][0][0] > 0
+    assert box_check["found"] == [True, True, True]
 
     page.locator("#live-threshold").fill("0.95")
     page.locator("#live-threshold").press("Tab")
@@ -353,11 +389,260 @@ def test_browser_can_run_detection_change_threshold_resize_overlay_and_stop(
     assert resized_canvas_box is not None
     assert abs(resized_image_box["width"] - resized_canvas_box["width"]) < 1
     assert abs(resized_image_box["height"] - resized_canvas_box["height"]) < 1
+    resized_box_check = page.evaluate(
+        """() => {
+          const image = document.querySelector("#live-processed-preview");
+          const canvas = document.querySelector("#live-overlay");
+          const bounds = image.getBoundingClientRect();
+          const ratio = window.devicePixelRatio || 1;
+          const context = canvas.getContext("2d");
+          const points = [
+            [bounds.width * 100 / 640, bounds.height * 200 / 360],
+            [bounds.width * 500 / 640, bounds.height * 200 / 360],
+            [bounds.width * 300 / 640, bounds.height * 300 / 360],
+          ];
+          const hasOverlayColor = (x, y) => {
+            const centerX = Math.round(x * ratio);
+            const centerY = Math.round(y * ratio);
+            for (let dx = -4; dx <= 4; dx += 1) {
+              for (let dy = -4; dy <= 4; dy += 1) {
+                const pixel = context.getImageData(centerX + dx, centerY + dy, 1, 1).data;
+                if (pixel[0] > 180 && pixel[1] > 140 && pixel[2] < 160 && pixel[3] > 0) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          };
+          return {
+            expected: points,
+            found: points.map(([x, y]) => hasOverlayColor(x, y)),
+          };
+        }"""
+    )
+    assert resized_box_check["found"] == [True, True, True]
 
     page.get_by_role("button", name="Stop detection", exact=True).click()
     page.get_by_text("Detection is stopped", exact=True).wait_for(timeout=5000)
     assert page.locator("#live-processed-preview").is_hidden()
     assert page.locator("#live-overlay").count() == 0
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("message_order", ["header_header_binary", "unexpected_binary"])
+def test_browser_rejects_invalid_processed_message_order(
+    fake_live_browser_base_url: str,
+    chromium,
+    tmp_path: Path,
+    message_order: str,
+) -> None:
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id=f"browser-order-{message_order}",
+    )
+    page = chromium.new_page(viewport={"width": 1280, "height": 1000})
+    page.add_init_script(
+        """
+        class MockWebSocket {
+          static OPEN = 1;
+          constructor(url) {
+            this.url = url;
+            this.readyState = MockWebSocket.OPEN;
+            window.__mockSocket = this;
+          }
+          close(code, reason) {
+            this.readyState = 3;
+            window.__mockClose = { code, reason };
+            if (this.onclose) this.onclose();
+          }
+          emit(data) {
+            if (this.onmessage) this.onmessage({ data });
+          }
+        }
+        window.WebSocket = MockWebSocket;
+        """
+    )
+    page.goto(f"{fake_live_browser_base_url}/cameras", wait_until="domcontentloaded")
+    page.get_by_label("Name", exact=True).fill("Order fixture")
+    page.get_by_label("RTSP endpoint", exact=True).fill("rtsp://fixture.local/live")
+    page.get_by_role("button", name="Save camera", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/cameras?notice=created")
+    page.goto(f"{fake_live_browser_base_url}/models", wait_until="domcontentloaded")
+    page.locator("#model-manifest").set_input_files(str(manifest_path))
+    page.locator("#model-archive").set_input_files(str(archive_path))
+    page.get_by_role("button", name="Import model", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/models?notice=imported")
+    page.get_by_role("button", name="Validate package", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/models?notice=validated")
+    page.goto(f"{fake_live_browser_base_url}/live", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Start detection", exact=True).click()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if page.evaluate("window.__mockSocket !== undefined"):
+            break
+        page.wait_for_timeout(50)
+    else:
+        raise AssertionError("mock WebSocket did not open")
+
+    header = {
+        "type": "frame_header",
+        "message_type": "frame_header",
+        "protocol_version": 1,
+        "generation_number": 1,
+        "camera_id": "camera-1",
+        "model_id": "model-1",
+        "model_checksum": "a" * 64,
+        "capture_session_id": "session-1",
+        "stream_epoch": "epoch-1",
+        "frame_sequence": 1,
+        "captured_at_utc": "2026-08-29T00:00:00Z",
+        "capture_timestamp": "2026-08-29T00:00:00Z",
+        "source_width": 8,
+        "source_height": 6,
+        "jpeg_width": 8,
+        "jpeg_height": 6,
+        "jpeg_byte_count": 1,
+        "detections": [],
+        "confidence_threshold": 0.35,
+        "threshold": 0.35,
+        "region_of_interest": None,
+        "roi": None,
+        "metrics": {},
+    }
+    header_text = json.dumps(header)
+    if message_order == "header_header_binary":
+        page.evaluate(
+            """(header) => {
+              window.__mockSocket.emit(header);
+              window.__mockSocket.emit(header);
+              window.__mockSocket.emit(new Uint8Array([1]).buffer);
+            }""",
+            header_text,
+        )
+    else:
+        page.evaluate(
+            "() => window.__mockSocket.emit(new Uint8Array([1]).buffer)",
+        )
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if page.evaluate("window.__mockClose !== undefined"):
+            break
+        page.wait_for_timeout(50)
+    else:
+        raise AssertionError("mock WebSocket did not close")
+    assert page.evaluate("window.__mockClose.code") == 1008
+    assert "protocol" in page.evaluate("window.__mockClose.reason")
+    page.get_by_role("button", name="Stop detection", exact=True).click()
+
+
+@pytest.mark.browser
+def test_browser_accepts_new_reconnect_epoch_and_discards_old_epoch(
+    fake_live_browser_base_url: str,
+    chromium,
+    tmp_path: Path,
+) -> None:
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id="browser-reconnect-model",
+    )
+    page = chromium.new_page(viewport={"width": 1280, "height": 1000})
+    page.add_init_script(
+        """
+        class MockWebSocket {
+          static OPEN = 1;
+          constructor(url) {
+            this.url = url;
+            this.readyState = MockWebSocket.OPEN;
+            window.__mockSocket = this;
+          }
+          close(code, reason) {
+            this.readyState = 3;
+            window.__mockClose = { code, reason };
+            if (this.onclose) this.onclose();
+          }
+          emit(data) {
+            if (this.onmessage) this.onmessage({ data });
+          }
+        }
+        window.WebSocket = MockWebSocket;
+        """
+    )
+    page.goto(f"{fake_live_browser_base_url}/cameras", wait_until="domcontentloaded")
+    page.get_by_label("Name", exact=True).fill("Reconnect fixture")
+    page.get_by_label("RTSP endpoint", exact=True).fill("rtsp://fixture.local/live")
+    page.get_by_role("button", name="Save camera", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/cameras?notice=created")
+    page.goto(f"{fake_live_browser_base_url}/models", wait_until="domcontentloaded")
+    page.locator("#model-manifest").set_input_files(str(manifest_path))
+    page.locator("#model-archive").set_input_files(str(archive_path))
+    page.get_by_role("button", name="Import model", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/models?notice=imported")
+    page.get_by_role("button", name="Validate package", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/models?notice=validated")
+    page.goto(f"{fake_live_browser_base_url}/live", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Start detection", exact=True).click()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if page.evaluate("window.__mockSocket !== undefined"):
+            break
+        page.wait_for_timeout(50)
+    else:
+        raise AssertionError("mock WebSocket did not open")
+
+    jpeg_image = Image.new("RGB", (8, 6), color=(40, 80, 120))
+    jpeg_output = BytesIO()
+    jpeg_image.save(jpeg_output, format="JPEG")
+    jpeg = list(jpeg_output.getvalue())
+
+    def header(epoch: str, session: str, sequence: int) -> dict[str, object]:
+        return {
+            "type": "frame_header",
+            "message_type": "frame_header",
+            "protocol_version": 1,
+            "generation_number": 1,
+            "camera_id": "camera-1",
+            "model_id": "model-1",
+            "model_checksum": "a" * 64,
+            "capture_session_id": session,
+            "stream_epoch": epoch,
+            "frame_sequence": sequence,
+            "captured_at_utc": "2026-08-29T00:00:00Z",
+            "capture_timestamp": "2026-08-29T00:00:00Z",
+            "source_width": 8,
+            "source_height": 6,
+            "jpeg_width": 8,
+            "jpeg_height": 6,
+            "jpeg_byte_count": len(jpeg),
+            "detections": [],
+            "confidence_threshold": 0.35,
+            "threshold": 0.35,
+            "region_of_interest": None,
+            "roi": None,
+            "metrics": {},
+        }
+
+    def emit_frame(epoch: str, session: str, sequence: int) -> None:
+        page.evaluate(
+            """({header, jpeg}) => {
+              window.__mockSocket.emit(JSON.stringify(header));
+              window.__mockSocket.emit(new Uint8Array(jpeg).buffer);
+            }""",
+            {"header": header(epoch, session, sequence), "jpeg": jpeg},
+        )
+
+    emit_frame("epoch-1", "session-1", 1)
+    page.locator("#live-processed-sequence").filter(has_text="1").wait_for(timeout=3000)
+    assert page.locator("#live-processed-epoch").inner_text() == "epoch-1"
+    assert page.locator("#live-processed-session").inner_text() == "session-1"
+    emit_frame("epoch-2", "session-2", 2)
+    page.locator("#live-processed-sequence").filter(has_text="2").wait_for(timeout=3000)
+    assert page.locator("#live-processed-epoch").inner_text() == "epoch-2"
+    assert page.locator("#live-processed-session").inner_text() == "session-2"
+    emit_frame("epoch-1", "session-1", 3)
+    page.wait_for_timeout(100)
+    assert page.locator("#live-processed-sequence").inner_text() == "2"
+    assert page.evaluate("window.__mockClose === undefined")
+    page.get_by_role("button", name="Stop detection", exact=True).click()
 
 
 @pytest.mark.browser

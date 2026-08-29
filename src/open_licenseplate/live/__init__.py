@@ -2,9 +2,11 @@
 
 from .display import (
     LIVE_PROTOCOL_VERSION,
+    MAX_RETIRED_PROVENANCES,
     DisplayBrokerMetrics,
     DisplayMessageTooLarge,
     DisplayProtocolError,
+    DisplayShutdownError,
     ProcessedDisplayBroker,
     ProcessedDisplayCandidate,
     ProcessedDisplayEncoder,
@@ -36,8 +38,10 @@ __all__ = [
     "DisplayBrokerMetrics",
     "DisplayMessageTooLarge",
     "DisplayProtocolError",
+    "DisplayShutdownError",
     "EpochFactory",
     "LIVE_PROTOCOL_VERSION",
+    "MAX_RETIRED_PROVENANCES",
     "LiveFrameResult",
     "LivePipelineConflict",
     "LivePipelineCoordinator",
