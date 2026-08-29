@@ -476,6 +476,8 @@ class FakeFrameSource(RecordedVideoSource):
         read_error: str | BaseException | None = None,
         fail_at: int | None = None,
         read_gate: threading.Event | None = None,
+        read_interval_seconds: float = 0.0,
+        repeat: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(frames if frames is not None else [], **kwargs)
@@ -483,6 +485,8 @@ class FakeFrameSource(RecordedVideoSource):
         self._read_error = read_error
         self._fail_at = fail_at
         self._read_gate = read_gate
+        self._read_interval_seconds = max(0.0, read_interval_seconds)
+        self._repeat = repeat
         self.opened = threading.Event()
         self.closed = threading.Event()
 
@@ -506,6 +510,10 @@ class FakeFrameSource(RecordedVideoSource):
         if self._read_error is not None and self._fail_at is None:
             self._mark_failed()
             raise SourceReadError(_safe_failure_message(self._read_error))
+        if self._read_interval_seconds and self._stop_requested.wait(self._read_interval_seconds):
+            return None
+        if self._repeat and self._frames and self._frame_index >= len(self._frames):
+            self._frame_index = 0
         return super().read()
 
     def close(self) -> None:

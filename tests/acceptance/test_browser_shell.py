@@ -12,6 +12,7 @@ import pytest
 import uvicorn
 
 from open_licenseplate.app import create_app
+from open_licenseplate.capture import FixtureAttempt, ReconnectFixture, make_preview_frame
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import upgrade_database
 
@@ -31,9 +32,12 @@ def browser_base_url(tmp_path: Path) -> Iterator[str]:
         }
     )
     upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    source_factory = ReconnectFixture(
+        (FixtureAttempt(frames=(make_preview_frame(16),), repeat=True),)
+    )
     server = uvicorn.Server(
         uvicorn.Config(
-            create_app(settings),
+            create_app(settings, source_factory=source_factory),
             host="127.0.0.1",
             port=_free_port(),
             log_config=None,
@@ -145,3 +149,28 @@ def test_browser_can_save_and_test_a_camera_without_secret_output(
     page.wait_for_url(f"{browser_base_url}/cameras?notice=test&status=valid*")
     assert page.get_by_role("status").inner_text().startswith("Camera configuration is valid")
     assert "secret-value" not in page.content()
+
+
+@pytest.mark.browser
+def test_browser_can_start_stop_preview_and_show_safe_runtime_state(
+    browser_base_url: str,
+    chromium,
+) -> None:
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    page.goto(f"{browser_base_url}/cameras", wait_until="domcontentloaded")
+    page.get_by_label("Name", exact=True).fill("Fixture camera")
+    page.get_by_label("RTSP endpoint", exact=True).fill("rtsp://fixture.local/live")
+    page.get_by_role("button", name="Save camera", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/cameras?notice=created")
+
+    page.goto(f"{browser_base_url}/live", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Start preview", exact=True).click()
+    page.get_by_text("Streaming", exact=True).wait_for(timeout=3000)
+    page.locator("#live-resolution").filter(has_text="8x6").wait_for(timeout=3000)
+    page.locator("#live-preview").wait_for(state="visible", timeout=3000)
+    assert page.locator("canvas").count() == 0
+    assert page.locator("#live-replaced").is_visible()
+
+    page.get_by_role("button", name="Stop", exact=True).click()
+    page.get_by_text("Stopped", exact=True).wait_for(timeout=3000)
+    assert page.locator("#live-preview").is_hidden()

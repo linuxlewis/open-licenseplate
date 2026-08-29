@@ -7,6 +7,9 @@
     <title>{{ page.title }} - {{ app_name }}</title>
     <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
     <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
+    {% if page.key == "live" %}
+      <script src="{{ request.url_for('static', path='live.js') }}" defer></script>
+    {% endif %}
   </head>
   <body class="density-{{ ui_density }}">
     <div class="app-background" aria-hidden="true"></div>
@@ -59,10 +62,91 @@
               <h1>{{ page.title }}</h1>
               <p class="lede">{{ page.description }}</p>
             </div>
-            <span class="page-index" aria-hidden="true">M0</span>
+            <span class="page-index" aria-hidden="true">{{ "M1" if page.key in ["live", "cameras"] else "M0" }}</span>
           </div>
 
-          {% if page.key == "cameras" %}
+          {% if page.key == "live" %}
+            <div
+              class="live-layout"
+              data-live-runtime
+              data-selected-camera="{{ selected_camera_id or '' }}"
+              data-state="{{ runtime_status.state }}"
+            >
+              <section class="card live-control-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Preview lifecycle</span>
+                    <h2>One active camera</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">LIVE</span>
+                </div>
+                <p class="form-note">
+                  M1 uses one latest frame. Reconnect waits stop immediately when you press Stop.
+                </p>
+                <label class="field-label" for="live-camera">Selected camera</label>
+                <select id="live-camera" name="camera_id" {% if not cameras %}disabled{% endif %}>
+                  {% if cameras %}
+                    {% for camera in cameras %}
+                      <option value="{{ camera.id }}" {% if camera.id == selected_camera_id %}selected{% endif %}>
+                        {{ camera.name }}
+                      </option>
+                    {% endfor %}
+                  {% else %}
+                    <option>No camera profiles</option>
+                  {% endif %}
+                </select>
+                <div class="live-actions">
+                  <button class="save-button" id="live-start" type="button" {% if not cameras %}disabled{% endif %}>
+                    Start preview
+                  </button>
+                  <button class="quiet-button" id="live-stop" type="button" {% if not cameras %}disabled{% endif %}>
+                    Stop
+                  </button>
+                </div>
+                <p class="live-message" id="live-message" role="status">
+                  {% if runtime_status.state == "failed" %}
+                    The source failed to open{% if runtime_status.last_error %}: {{ runtime_status.last_error }}{% endif %}.
+                    Fix the source settings, then press Start preview.
+                  {% elif runtime_status.state == "stopping" %}
+                    Stopping the camera and releasing source resources.
+                  {% elif cameras %}
+                    Select a camera and start the preview.
+                  {% else %}
+                    Add a camera profile before starting a preview.
+                  {% endif %}
+                </p>
+                <a class="text-link" id="live-snapshot" href="#" hidden>Open current JPEG snapshot</a>
+              </section>
+
+              <section class="card live-preview-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Current frame</span>
+                    <h2 id="live-preview-title">Preview is stopped</h2>
+                  </div>
+                  <span class="camera-state" id="live-state">{{ runtime_status.state|title }}</span>
+                </div>
+                <div class="preview-stage">
+                  <div class="preview-empty" id="live-preview-empty">
+                    <span class="empty-orbit small" aria-hidden="true"><span></span><span></span><span></span></span>
+                    <strong>Waiting for a decoded frame</strong>
+                    <span>The latest frame appears here when the source is streaming.</span>
+                  </div>
+                  <img id="live-preview" alt="Current camera preview" hidden>
+                </div>
+                <dl class="live-metadata">
+                  <div><dt>Codec</dt><dd id="live-codec">Unavailable</dd></div>
+                  <div><dt>Resolution</dt><dd id="live-resolution">Unavailable</dd></div>
+                  <div><dt>Nominal FPS</dt><dd id="live-fps">Unavailable</dd></div>
+                  <div><dt>Transport</dt><dd id="live-transport">Unavailable</dd></div>
+                  <div><dt>Camera PTS</dt><dd id="live-pts">Unavailable</dd></div>
+                  <div><dt>Reconnect attempt</dt><dd id="live-reconnect">0</dd></div>
+                  <div><dt>Frame age</dt><dd id="live-age">Unavailable</dd></div>
+                  <div><dt>Replaced frames</dt><dd id="live-replaced">0</dd></div>
+                </dl>
+              </section>
+            </div>
+          {% elif page.key == "cameras" %}
             {% if camera_feedback %}
               <div class="notice notice-{{ camera_feedback.tone }}" role="status">
                 {{ camera_feedback.message }}
@@ -153,7 +237,7 @@
                   </div>
                   <div class="detail-row">
                     <dt>Network</dt>
-                    <dd><strong>Not contacted</strong><small>FrameSource is out of scope for this slice</small></dd>
+                    <dd><strong>Opened only for a test</strong><small>Runtime reconnects in the Live page</small></dd>
                   </div>
                 </dl>
               </section>

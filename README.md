@@ -14,11 +14,13 @@ uv run open-licenseplate serve
 ```
 
 The server binds to `127.0.0.1` by default. Open `http://127.0.0.1:8421/` in a
-browser. The M0 slice provides startup, health checks, managed paths,
-diagnostics, SQLite persistence, migrations, and a Jinja/HTMX shell.
+browser. The M0 and M1 slices provide startup, health checks, managed paths,
+diagnostics, SQLite persistence, migrations, a Jinja/HTMX shell, camera
+configuration, source testing, a live MJPEG preview, and reconnect recovery.
 The shell includes Live, Events, Jobs, Cameras, Models, and System pages. The
-Cameras page provides M1-A camera configuration and safe configuration tests.
-The future product pages use clear empty states until their milestone is complete.
+Cameras page saves safe profiles and opens a source during a connection test.
+The Live page starts and stops one camera at a time. The future product pages
+use clear empty states until their milestone is complete.
 The System page can save a comfortable or compact display density in the local
 settings table. Camera streaming, preview, model, tracking, and processing
 features arrive in later milestones.
@@ -49,12 +51,30 @@ keychain:service/account
 For an environment reference, the variable can contain the complete RTSP URL,
 including credentials. The application stores only the reference and a
 redacted endpoint description in SQLite. It does not return the resolved value
-to the API or browser. The camera test validates the endpoint and credential
-availability; the API does not open a network stream in this slice. The runtime
-source is available through the capture package described below.
+to the API or browser. The camera test opens the source and reports safe codec,
+resolution, nominal FPS, transport, and camera PTS availability. It does not
+return the resolved URL or password.
 
 The same controls are available on the Cameras page at `/cameras`, and the
 JSON API uses `/api/v1/cameras`.
+
+Camera lifecycle endpoints are:
+
+```text
+POST /api/v1/cameras/{camera_id}/start
+POST /api/v1/cameras/{camera_id}/stop
+GET  /api/v1/cameras/{camera_id}/status
+GET  /api/v1/cameras/{camera_id}/preview.mjpeg
+GET  /api/v1/cameras/{camera_id}/snapshot.jpg
+```
+
+The lifecycle states are `stopped`, `connecting`, `streaming`, `degraded`,
+`reconnecting`, `stopping`, and `failed`. An initial source-open error enters
+`failed` with an action message. It does not retry. A disconnect after a
+successful session enters `degraded`, then `reconnecting`. Reconnect uses
+bounded exponential backoff with jitter. A stable stream resets the retry
+delay. Stop enters `stopping`, cancels a reconnect wait, and closes the source,
+broker, and capture worker.
 
 Audit managed files for unredacted secret patterns with:
 
@@ -67,7 +87,7 @@ contents or resolved credential values.
 
 ### Frame sources and latest frame delivery
 
-The capture package provides the P05 runtime contract:
+The capture package provides the M1 runtime:
 
 - `FrameSource.open()`, `read()`, and `close()` own one capture session.
 - `VideoFrame` keeps host UTC time, host monotonic time, camera PTS, sequence,
@@ -78,9 +98,71 @@ The capture package provides the P05 runtime contract:
 - `LatestFrameBroker` has capacity one. A new frame replaces an unread frame.
 - `RecordedVideoSource` and `FakeFrameSource` support deterministic tests.
 - `FrameCaptureWorker` runs blocking source operations on a dedicated thread.
+- `CameraRuntime` owns one source, one worker, one capacity-one broker, and
+  the reconnect state machine.
+- `ReconnectFixture` provides a reproducible disconnect and recovery sequence.
 
-The camera API test remains configuration-only in this slice. The source and
-worker contracts are ready for the later preview lifecycle integration.
+The preview encoder creates bounded MJPEG output from the newest decoded frame.
+The snapshot endpoint returns the newest frame as one JPEG.
+
+### Deterministic reconnect fixture
+
+The test suite keeps an in-memory fixture. It sends one frame, injects a decode
+disconnect, waits through a short reconnect delay, and then repeats new frames.
+It is safe to run on Linux, macOS, or another host without camera access:
+
+```bash
+uv run pytest tests/unit/test_lifecycle.py tests/integration/test_preview_lifecycle.py
+```
+
+The fixture uses `ReconnectFixture` and `FixtureAttempt` from
+`open_licenseplate.capture`. Production code still uses `PyAVRTSPSource` for
+real RTSP cameras. No fixture password or complete secret URL is written to
+logs, SQLite, HTML, API output, or diagnostics.
+
+The recorded-stream integration fixture creates a small deterministic Matroska
+file with PyAV, then opens it through `RecordedVideoSource`:
+
+```bash
+uv run pytest tests/integration/test_stream_fixture.py -q
+```
+
+This is the default local stream check because this repository environment does
+not include an RTSP server. On macOS or Linux with a local RTSP server, set the
+fixture URL and run the optional test:
+
+```bash
+OPEN_LICENSEPLATE_RTSP_URL=rtsp://127.0.0.1:8554/fixture \
+  uv run pytest tests/integration/test_stream_fixture.py -q
+```
+
+The optional test expects the local server to publish the same URL. It uses
+TCP and does not print the URL.
+
+### M1 manual validation
+
+Use a configured RTSP URL through an environment reference:
+
+```bash
+M1_ROOT="$(mktemp -d)"
+M1_DATA="$M1_ROOT/data"
+M1_LOGS="$M1_ROOT/logs"
+export CAMERA_RTSP_URL='rtsp://user:password@camera.example/live'
+uv run open-licenseplate dev fixture --data-dir "$M1_DATA" --log-dir "$M1_LOGS"
+uv run open-licenseplate db upgrade --data-dir "$M1_DATA" --log-dir "$M1_LOGS"
+uv run open-licenseplate serve --data-dir "$M1_DATA" --log-dir "$M1_LOGS"
+```
+
+Open `/cameras`, save an endpoint with `env:CAMERA_RTSP_URL`, and run these
+checks:
+
+1. The camera test opens the source and shows safe stream metadata.
+2. Live starts one camera and shows the current MJPEG frame.
+3. A second camera start returns a conflict with a stop action.
+4. A source interruption shows `degraded` and `reconnecting`.
+5. Source recovery returns to `streaming`.
+6. Stop closes the preview and cancels a pending reconnect.
+7. `doctor --audit-secrets` reports safe output.
 
 ### Empty development fixture
 
