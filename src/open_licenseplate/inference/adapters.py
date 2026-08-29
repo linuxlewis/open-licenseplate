@@ -113,7 +113,7 @@ class UltralyticsYoloNmsAdapter:
 
 
 def _normalise_boxes(value: Any, box_format: str) -> list[tuple[float, float, float, float]]:
-    array = _squeeze_batch(np.asarray(value))
+    array = _squeeze_batch(_output_array(value, "boxes"))
     if array.size == 0:
         return []
     if array.ndim == 1:
@@ -131,7 +131,10 @@ def _normalise_boxes(value: Any, box_format: str) -> list[tuple[float, float, fl
         array = _flatten_coordinate_array(array)
     if array.shape[-1] != 4:
         raise DetectionValidationError("boxes output must have a coordinate axis of length 4")
-    rows = [(float(row[0]), float(row[1]), float(row[2]), float(row[3])) for row in array]
+    try:
+        rows = [(float(row[0]), float(row[1]), float(row[2]), float(row[3])) for row in array]
+    except (TypeError, ValueError) as error:
+        raise DetectionValidationError("boxes output must contain numeric values") from error
     if box_format == "xywh":
         return [_xywh_to_xyxy(row) for row in rows]
     if box_format != "xyxy":
@@ -140,7 +143,9 @@ def _normalise_boxes(value: Any, box_format: str) -> list[tuple[float, float, fl
 
 
 def _normalise_scores(value: Any, candidate_count: int) -> tuple[list[float], list[int]]:
-    array = _squeeze_batch(np.asarray(value))
+    array = _squeeze_batch(_output_array(value, "scores"))
+    if not np.issubdtype(array.dtype, np.number):
+        raise DetectionValidationError("scores output must contain numeric values")
     if array.size == 0 and candidate_count == 0:
         return [], []
     if array.ndim == 0:
@@ -183,7 +188,7 @@ def _normalise_scores(value: Any, candidate_count: int) -> tuple[list[float], li
 
 
 def _normalise_classes(value: Any, candidate_count: int) -> list[int]:
-    array = _squeeze_batch(np.asarray(value))
+    array = _squeeze_batch(_output_array(value, "classes"))
     if array.size != candidate_count:
         raise DetectionValidationError("classes output count does not match boxes")
     classes: list[int] = []
@@ -204,7 +209,9 @@ def _decode_raw_output(
     box_format: str,
     raw_has_objectness: bool,
 ) -> tuple[list[tuple[float, float, float, float]], list[float], list[int]]:
-    array = _squeeze_batch(np.asarray(value))
+    array = _squeeze_batch(_output_array(value, "raw"))
+    if not np.issubdtype(array.dtype, np.number):
+        raise DetectionValidationError("raw output must contain numeric values")
     if array.size == 0:
         return [], [], []
     if array.ndim == 1:
@@ -236,6 +243,13 @@ def _decode_raw_output(
         ]
         classes = [int(value) for value in class_ids]
     return boxes, scores, classes
+
+
+def _output_array(value: Any, label: str) -> np.ndarray:
+    try:
+        return np.asarray(value)
+    except (TypeError, ValueError) as error:
+        raise DetectionValidationError(f"{label} output is not an array") from error
 
 
 def _squeeze_batch(array: np.ndarray) -> np.ndarray:
