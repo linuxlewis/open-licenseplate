@@ -1,8 +1,4 @@
-"""Typed application settings and P00 source precedence.
-
-P00 supports CLI > environment > built-in default. Persisted settings arrive
-with the database work in P01.
-"""
+"""Typed application settings and source precedence."""
 
 from __future__ import annotations
 
@@ -150,17 +146,36 @@ def _normalise_overrides(overrides: Mapping[str, Any] | None) -> dict[str, Any]:
 def load_settings(
     *,
     cli_overrides: Mapping[str, Any] | None = None,
+    include_persisted: bool = True,
 ) -> AppSettings:
-    """Load settings with CLI > environment > default precedence."""
+    """Load settings with CLI > environment > persisted > default precedence."""
     defaults = AppSettings.model_validate({})
     environment = AppSettings()
     cli = _normalise_overrides(cli_overrides)
     env_values = _explicit_values(environment)
-    merged = _merge_dicts(defaults.model_dump(mode="python"), env_values)
+    persisted_values: dict[str, Any] = {}
+
+    if include_persisted:
+        from .paths import ManagedPaths
+        from .settings_store import read_persisted_settings
+
+        bootstrap = _merge_dicts(defaults.model_dump(mode="python"), env_values)
+        bootstrap = _merge_dicts(bootstrap, cli)
+        bootstrap_storage = StorageSettings.model_validate(bootstrap["storage"])
+        bootstrap_paths = ManagedPaths.from_roots(
+            bootstrap_storage.data_dir,
+            bootstrap_storage.log_dir,
+        )
+        persisted_values = read_persisted_settings(bootstrap_paths.database)
+
+    persisted = _normalise_overrides(persisted_values)
+    merged = _merge_dicts(defaults.model_dump(mode="python"), persisted)
+    merged = _merge_dicts(merged, env_values)
     merged = _merge_dicts(merged, cli)
     settings = AppSettings.model_validate(merged)
 
     sources = _flatten_paths(defaults.model_dump(mode="python"), "default")
+    sources.update(_flatten_paths(persisted, "persisted"))
     sources.update(_flatten_paths(env_values, "environment"))
     sources.update(_flatten_paths(cli, "cli"))
     settings._sources = sources
