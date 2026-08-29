@@ -249,6 +249,32 @@ OPEN_LICENSEPLATE_COREML_MANIFEST=/path/to/model-manifest.yaml \
 uv run pytest -m macos
 ```
 
+### M3-A live pipeline coordinator
+
+The M3-A coordinator connects one M1 camera runtime to one M2 detector session.
+The ASGI event loop only controls the pipeline. A dedicated worker performs
+model loading, warm-up, frame preparation, prediction, and output decoding.
+The capture broker and inference subscription each keep only one frame.
+
+The live control API is:
+
+```text
+POST  /api/v1/live/start
+GET   /api/v1/live/state
+PATCH /api/v1/live/settings
+POST  /api/v1/live/stop
+```
+
+Start accepts `camera_id`, `model_id`, an optional `confidence_threshold`,
+`compute_units`, and a bounded source-pixel `region_of_interest`. The state
+payload reports camera, model, capture-session, stream-epoch, frame-sequence,
+timing, FPS, and replacement-count provenance. A model or camera resource
+change requires a clean stop first.
+
+M3-A does not include the detection WebSocket, JPEG display units, browser
+overlays, tracking, event storage, or long replay tests. It uses fake source
+and backend fixtures for portable lifecycle and no-backlog tests.
+
 ### Empty development fixture
 
 Create a clean directory layout for local M0 work with:

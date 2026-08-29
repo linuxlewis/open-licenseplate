@@ -23,6 +23,8 @@ from .capture import CameraRuntime, PyAVRTSPSource, SourceFactory
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
 from .inference import CoreMLBackend, DetectorRegistry, InferenceBackend
+from .live import LivePipelineCoordinator
+from .live.api import router as live_api_router
 from .logging import configure_logging
 from .models.api import _read_import_request
 from .models.api import router as model_api_router
@@ -102,6 +104,7 @@ def create_app(
     effective_source_factory = source_factory or _default_source_factory
     camera_runtime = CameraRuntime(effective_source_factory)
     backend_factory = inference_backend_factory or CoreMLBackend
+    live_pipeline = LivePipelineCoordinator(camera_runtime, backend_factory)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -118,6 +121,7 @@ def create_app(
         try:
             yield
         finally:
+            await asyncio.to_thread(live_pipeline.close)
             application.state.detector_registry.close()
             await asyncio.to_thread(camera_runtime.close)
             application.state.startup_complete = False
@@ -134,10 +138,12 @@ def create_app(
     application.state.camera_runtime = camera_runtime
     application.state.camera_source_factory = effective_source_factory
     application.state.inference_backend_factory = backend_factory
+    application.state.live_pipeline = live_pipeline
     application.state.detector_registry = DetectorRegistry(backend_factory)
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)
     application.include_router(model_api_router)
+    application.include_router(live_api_router)
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -386,10 +392,6 @@ def create_app(
         payload, status_code = _readiness_payload(effective_settings, paths)
         return JSONResponse(content=payload, status_code=status_code)
 
-    @application.get("/api/v1/live/state")
-    async def live_state() -> dict[str, Any]:
-        return camera_runtime.status().as_dict()
-
     @application.get("/api/v1/system/status")
     async def system_status() -> dict[str, Any]:
         database = database_status(paths.database)
@@ -399,12 +401,14 @@ def create_app(
             "database": database,
             "directories": paths.directory_checks(),
             "runtime": camera_runtime.status().as_dict(),
+            "live_pipeline": live_pipeline.status().as_dict(),
         }
 
     @application.get("/api/v1/system/metrics")
     async def system_metrics() -> dict[str, Any]:
         return {
             "camera": camera_runtime.status().as_dict(),
+            "live_pipeline": live_pipeline.status().as_dict(),
         }
 
     return application
