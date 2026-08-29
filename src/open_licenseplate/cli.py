@@ -19,6 +19,8 @@ from .config import SettingsError, load_settings
 from .database import Database, database_status, upgrade_database
 from .diagnostics import build_diagnostics
 from .logging import configure_logging
+from .models.repository import ModelRepository
+from .models.service import ModelImportError, import_model
 from .paths import ManagedPaths
 from .redaction import redact_text
 from .settings_store import SettingsStore, validate_setting_key
@@ -72,6 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="scan managed files for unredacted secret patterns",
     )
     _add_runtime_options(doctor_parser)
+
+    models_parser = commands.add_parser("models", help="manage local model packages")
+    models_commands = models_parser.add_subparsers(dest="models_command")
+    import_parser = models_commands.add_parser(
+        "import",
+        help="import one local model archive or .mlpackage directory",
+    )
+    import_parser.add_argument("--manifest", type=Path, required=True)
+    import_parser.add_argument("--archive", type=Path, required=True)
+    _add_runtime_options(import_parser)
 
     dev_parser = commands.add_parser("dev", help="development-only commands")
     dev_commands = dev_parser.add_subparsers(dest="dev_command")
@@ -318,6 +330,31 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
     return 0 if ready else 1
 
 
+def _run_model_import(arguments: argparse.Namespace) -> int:
+    settings, paths = _load_cli_settings(arguments)
+    status = database_status(paths.database)
+    if status["status"] != "ok":
+        raise SettingsError(
+            "database is not ready; run `open-licenseplate db upgrade` before importing a model"
+        )
+    try:
+        manifest_value = arguments.manifest.read_bytes()
+    except OSError as error:
+        raise ModelImportError("manifest file could not be read") from error
+    database = Database(paths.database)
+    try:
+        model = import_model(
+            manifest_value=manifest_value,
+            source_path=arguments.archive,
+            paths=paths,
+            repository=ModelRepository(database),
+        )
+    finally:
+        database.dispose()
+    print(f"Imported model {model.id} with checksum {model.artifact_sha256}.")
+    return 0
+
+
 def _run_dev_fixture(arguments: argparse.Namespace) -> int:
     """Create an empty managed directory layout without creating application data."""
     settings = load_settings(
@@ -344,6 +381,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_settings_set(arguments)
         if arguments.command == "doctor":
             return _run_doctor(arguments)
+        if arguments.command == "models" and arguments.models_command == "import":
+            return _run_model_import(arguments)
         if arguments.command == "dev" and arguments.dev_command == "fixture":
             return _run_dev_fixture(arguments)
     except (SettingsError, ValueError) as error:

@@ -11,6 +11,7 @@ import httpx
 import pytest
 import uvicorn
 
+from model_helpers import create_model_fixture
 from open_licenseplate.app import create_app
 from open_licenseplate.capture import FixtureAttempt, ReconnectFixture, make_preview_frame
 from open_licenseplate.config import load_settings
@@ -174,3 +175,34 @@ def test_browser_can_start_stop_preview_and_show_safe_runtime_state(
     page.get_by_role("button", name="Stop", exact=True).click()
     page.get_by_text("Stopped", exact=True).wait_for(timeout=3000)
     assert page.locator("#live-preview").is_hidden()
+
+
+@pytest.mark.browser
+def test_browser_can_import_and_manage_a_model_package(
+    browser_base_url: str,
+    chromium,
+    tmp_path: Path,
+) -> None:
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id="browser-model",
+    )
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    page.goto(f"{browser_base_url}/models", wait_until="domcontentloaded")
+
+    page.locator("#model-manifest").set_input_files(str(manifest_path))
+    page.locator("#model-archive").set_input_files(str(archive_path))
+    page.get_by_role("button", name="Import model", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/models?notice=imported")
+
+    assert page.get_by_role("heading", name="Test model", exact=True).is_visible()
+    assert "Runtime validation was not run" in page.content()
+    page.get_by_role("button", name="Activate", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/models?notice=activated")
+    assert page.get_by_role("button", name="Deactivate", exact=True).is_visible()
+
+    page.get_by_role("button", name="Deactivate", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/models?notice=deactivated")
+    page.get_by_role("button", name="Delete", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/models?notice=deleted")
+    assert page.get_by_text("No managed model packages yet.").is_visible()

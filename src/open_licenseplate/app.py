@@ -23,6 +23,16 @@ from .capture import CameraRuntime, PyAVRTSPSource, SourceFactory
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
 from .logging import configure_logging
+from .models.api import _read_import_request
+from .models.api import router as model_api_router
+from .models.repository import ModelRepository
+from .models.service import (
+    ModelConflictError,
+    ModelImportError,
+    delete_model,
+    import_model,
+    validate_model,
+)
 from .paths import ManagedPaths
 from .redaction import redact_text
 from .settings_store import SettingsStore
@@ -120,6 +130,7 @@ def create_app(
     application.state.camera_source_factory = effective_source_factory
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)
+    application.include_router(model_api_router)
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -252,6 +263,74 @@ def create_app(
     async def models_page(request: Request) -> Any:
         return render_page(request, effective_settings, paths, "models")
 
+    @application.post("/models/import", include_in_schema=False)
+    async def import_model_from_page(request: Request) -> RedirectResponse:
+        if database_status(paths.database)["status"] != "ok":
+            return _model_redirect("database")
+        archive_path = None
+        database = None
+        try:
+            manifest_value, archive_path = await _read_import_request(request)
+            database = Database(paths.database)
+            import_model(
+                manifest_value=manifest_value,
+                source_path=archive_path,
+                paths=paths,
+                repository=ModelRepository(database),
+            )
+        except ModelConflictError as error:
+            return _model_redirect("error", str(error))
+        except (ModelImportError, ValueError) as error:
+            return _model_redirect("error", str(error))
+        finally:
+            if archive_path is not None:
+                archive_path.unlink(missing_ok=True)
+            if database is not None:
+                database.dispose()
+        return _model_redirect("imported")
+
+    @application.post("/models/{model_id}/validate", include_in_schema=False)
+    async def validate_model_from_page(model_id: str) -> RedirectResponse:
+        database = _ready_database(paths)
+        if database is None:
+            return _model_redirect("database")
+        try:
+            repository = ModelRepository(database)
+            model = repository.get(model_id)
+            if model is None:
+                return _model_redirect("missing")
+            result = validate_model(model=model, paths=paths, repository=repository)
+        except ModelImportError as error:
+            return _model_redirect("error", str(error))
+        finally:
+            database.dispose()
+        return _model_redirect("validated" if result.valid else "invalid")
+
+    @application.post("/models/{model_id}/activate", include_in_schema=False)
+    async def activate_model_from_page(model_id: str) -> RedirectResponse:
+        return _model_state_from_page(model_id, paths, active=True)
+
+    @application.post("/models/{model_id}/deactivate", include_in_schema=False)
+    async def deactivate_model_from_page(model_id: str) -> RedirectResponse:
+        return _model_state_from_page(model_id, paths, active=False)
+
+    @application.post("/models/{model_id}/delete", include_in_schema=False)
+    async def delete_model_from_page(model_id: str) -> RedirectResponse:
+        database = _ready_database(paths)
+        if database is None:
+            return _model_redirect("database")
+        try:
+            repository = ModelRepository(database)
+            model = repository.get(model_id)
+            if model is None:
+                return _model_redirect("missing")
+            delete_model(model=model, paths=paths, repository=repository)
+        except ModelImportError as error:
+            return _model_redirect("error", str(error))
+        finally:
+            database.dispose()
+        return _model_redirect("deleted")
+
     @application.get("/system", name="system_page", include_in_schema=False)
     async def system_page(request: Request) -> Any:
         return render_page(request, effective_settings, paths, "system")
@@ -348,3 +427,43 @@ def _camera_redirect(kind: str, status: str = "", message: str = "") -> Redirect
     if message:
         query += f"&message={quote(redact_text(message), safe='')}"
     return RedirectResponse(f"/cameras?{query}", status_code=303)
+
+
+def _model_state_from_page(
+    model_id: str,
+    paths: ManagedPaths,
+    *,
+    active: bool,
+) -> RedirectResponse:
+    database = _ready_database(paths)
+    if database is None:
+        return _model_redirect("database")
+    try:
+        repository = ModelRepository(database)
+        model = repository.get(model_id)
+        if model is None:
+            return _model_redirect("missing")
+        if active and model.validation_state != "valid":
+            return _model_redirect("error", "only valid models can be activated")
+        if active:
+            artifact_path = ManagedPaths.validate_contained_path(
+                paths.models / model.artifact_path,
+                paths.models,
+            )
+            if not artifact_path.is_dir() or artifact_path.is_symlink():
+                return _model_redirect("error", "model artifact is missing")
+        updated = repository.set_active(model_id, active)
+        if updated is None:
+            return _model_redirect("missing")
+    except (ModelImportError, ValueError) as error:
+        return _model_redirect("error", str(error))
+    finally:
+        database.dispose()
+    return _model_redirect("activated" if active else "deactivated")
+
+
+def _model_redirect(kind: str, message: str = "") -> RedirectResponse:
+    query = f"notice={quote(redact_text(kind), safe='')}"
+    if message:
+        query += f"&message={quote(redact_text(message), safe='')}"
+    return RedirectResponse(f"/models?{query}", status_code=303)

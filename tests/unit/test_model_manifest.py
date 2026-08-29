@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from open_licenseplate.models.manifest import ModelManifestError, parse_manifest
+
+
+def _manifest(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "id": "test-model",
+        "display_name": "Test model",
+        "task": "object_detection",
+        "backend": "coreml",
+        "adapter": "ultralytics_yolo_nms",
+        "artifact": "model.mlpackage",
+        "artifact_sha256": "a" * 64,
+        "input": {
+            "name": "image",
+            "kind": "image",
+            "width": 640,
+            "height": 640,
+            "color_space": "rgb",
+        },
+        "preprocessing": {"resize": "letterbox"},
+        "outputs": {"boxes": "coordinates", "scores": "confidence"},
+        "labels": ["license_plate"],
+        "defaults": {"confidence_threshold": 0.35, "iou_threshold": 0.45},
+        "compatibility": {"minimum_macos": "14.0"},
+        "source": {"url": "https://example.test/model", "license": "MIT"},
+        "conversion": {"source_weight": "weights.pt", "tool_versions": {}, "arguments": {}},
+    }
+    value.update(overrides)
+    return value
+
+
+def test_manifest_accepts_json_and_yaml() -> None:
+    manifest = parse_manifest(json.dumps(_manifest()))
+    yaml_manifest = parse_manifest(
+        """
+schema_version: 1
+id: test-model
+display_name: Test model
+backend: coreml
+adapter: ultralytics_yolo_nms
+artifact: model.mlpackage
+artifact_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"""
+    )
+
+    assert manifest.model_id == "test-model"
+    assert yaml_manifest.backend == "coreml"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("backend", "onnx", "backend"),
+        ("adapter", "unknown", "adapter"),
+        ("id", "../model", "id"),
+        ("artifact", "../model.mlpackage", "artifact"),
+        ("artifact_sha256", "not-a-checksum", "artifact_sha256"),
+    ],
+)
+def test_manifest_rejects_unsupported_or_unsafe_values(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    with pytest.raises(ModelManifestError, match=message):
+        parse_manifest(_manifest(**{field: value}))
+
+
+def test_manifest_rejects_invalid_nested_values() -> None:
+    with pytest.raises(ModelManifestError, match="confidence_threshold"):
+        parse_manifest(
+            _manifest(
+                defaults={"confidence_threshold": 2, "iou_threshold": 0.45},
+            )
+        )
+
+    with pytest.raises(ModelManifestError, match="source.url"):
+        parse_manifest(_manifest(source={"url": "file:///unsafe", "license": "MIT"}))
+
+
+def test_manifest_rejects_non_object_input() -> None:
+    with pytest.raises(ModelManifestError, match="input"):
+        parse_manifest(_manifest(input=["not", "an", "object"]))

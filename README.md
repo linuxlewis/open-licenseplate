@@ -19,8 +19,10 @@ diagnostics, SQLite persistence, migrations, a Jinja/HTMX shell, camera
 configuration, source testing, a live MJPEG preview, and reconnect recovery.
 The shell includes Live, Events, Jobs, Cameras, Models, and System pages. The
 Cameras page saves safe profiles and opens a source during a connection test.
-The Live page starts and stops one camera at a time. The future product pages
-use clear empty states until their milestone is complete.
+The Live page starts and stops one camera at a time. Other future product pages
+use clear empty states until their milestone is complete. The Models page
+provides P07 secure package import and registry operations. It does not load a
+Core ML model or run inference.
 The System page can save a comfortable or compact display density in the local
 settings table. Camera streaming, preview, model, tracking, and processing
 features arrive in later milestones.
@@ -75,6 +77,36 @@ successful session enters `degraded`, then `reconnecting`. Reconnect uses
 bounded exponential backoff with jitter. A stable stream resets the retry
 delay. Stop enters `stopping`, cancels a reconnect wait, and closes the source,
 broker, and capture worker.
+
+### Model import and registry
+
+Import a model with a manifest and a local ZIP archive:
+
+```bash
+uv run open-licenseplate models import \
+  --manifest model-manifest.yaml \
+  --archive model.zip \
+  --data-dir /tmp/open-licenseplate-m2/data \
+  --log-dir /tmp/open-licenseplate-m2/logs
+```
+
+The archive must contain one top-level `.mlpackage` directory. The importer
+rejects absolute paths, traversal, symlinks, duplicate paths, executable
+content, and oversized archives or files. It extracts into a unique staging
+directory, computes a deterministic SHA-256 tree checksum, and atomically
+moves the package into the managed models directory before writing the
+registry row. A failed import removes staging and any final package created
+by that import.
+
+The manifest is stored as an immutable JSON snapshot. The registry records the
+manifest ID, backend, adapter, source, license, checksum, package validation
+state, and active state. Activation only selects a package for a later runtime
+slice. This PR never executes imported files, loads Core ML, or runs
+prediction.
+
+The browser workflow is available at `/models`. The JSON registry API uses
+`/api/v1/models` with import, read, package validation, activation,
+deactivation, and safe deletion operations.
 
 Audit managed files for unredacted secret patterns with:
 

@@ -15,6 +15,7 @@ from .cameras.api import camera_payload
 from .cameras.repository import CameraRepository
 from .config import AppSettings
 from .database import Database, database_status
+from .models.repository import ModelRepository, model_payload
 from .paths import ManagedPaths
 from .redaction import redact_text
 
@@ -241,6 +242,29 @@ def _camera_rows(paths: ManagedPaths, database: dict[str, Any]) -> list[dict[str
         owned_database.dispose()
 
 
+def _model_rows(paths: ManagedPaths, database: dict[str, Any]) -> list[dict[str, Any]]:
+    if database["status"] != "ok":
+        return []
+
+    owned_database = Database(paths.database)
+    try:
+        repository = ModelRepository(owned_database)
+        rows = []
+        for model in repository.list():
+            try:
+                artifact_path = ManagedPaths.validate_contained_path(
+                    paths.models / model.artifact_path,
+                    paths.models,
+                )
+                artifact_exists = artifact_path.is_dir() and not artifact_path.is_symlink()
+            except ValueError:
+                artifact_exists = False
+            rows.append(model_payload(model, artifact_exists=artifact_exists))
+        return rows
+    finally:
+        owned_database.dispose()
+
+
 def _camera_feedback(request: Request) -> dict[str, str] | None:
     notice = request.query_params.get("notice")
     if notice is None:
@@ -274,6 +298,35 @@ def _camera_feedback(request: Request) -> dict[str, str] | None:
         ("attention", "Camera operation completed."),
     )
     return {"tone": tone, "message": default_message}
+
+
+def _model_feedback(request: Request) -> dict[str, str] | None:
+    notice = request.query_params.get("notice")
+    if notice is None:
+        return None
+    messages = {
+        "imported": ("positive", "Model package imported. Runtime model loading was not run."),
+        "validated": (
+            "positive",
+            "Model package checks passed. Runtime model loading was not run.",
+        ),
+        "invalid": ("attention", "Model package checks failed."),
+        "activated": ("positive", "Model activated for the next runtime slice."),
+        "deactivated": ("positive", "Model deactivated."),
+        "deleted": ("positive", "Model deleted."),
+        "missing": ("attention", "Model was not found."),
+        "database": (
+            "attention",
+            "Database is not ready. Run `open-licenseplate db upgrade` first.",
+        ),
+    }
+    if notice == "error":
+        return {
+            "tone": "attention",
+            "message": redact_text(request.query_params.get("message", "Model operation failed.")),
+        }
+    tone, message = messages.get(notice, ("attention", "Model operation completed."))
+    return {"tone": tone, "message": message}
 
 
 def _context(
@@ -312,7 +365,9 @@ def _context(
         "runtime": _runtime_rows(runtime_status),
         "directory_checks": directories,
         "cameras": cameras,
+        "models": _model_rows(paths, database),
         "camera_feedback": _camera_feedback(request),
+        "model_feedback": _model_feedback(request),
         "runtime_status": runtime_status,
         "selected_camera_id": selected_camera_id,
     }
