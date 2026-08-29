@@ -16,6 +16,7 @@ from .config import SettingsError, load_settings
 from .database import Database, database_status, upgrade_database
 from .logging import configure_logging
 from .paths import ManagedPaths
+from .redaction import redact_text
 from .settings_store import SettingsStore, validate_setting_key
 
 logger = logging.getLogger("open_licenseplate.cli")
@@ -273,10 +274,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "dev" and arguments.dev_command == "fixture":
             return _run_dev_fixture(arguments)
     except (SettingsError, ValueError) as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(f"error: {redact_text(str(error))}", file=sys.stderr)
         return 2
     except Exception as error:
-        print(f"error: command failed: {error}", file=sys.stderr)
+        print(f"error: command failed: {redact_text(str(error))}", file=sys.stderr)
         return 1
 
     parser.print_help()

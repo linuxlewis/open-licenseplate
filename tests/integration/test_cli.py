@@ -4,6 +4,12 @@ from pathlib import Path
 import pytest
 
 from open_licenseplate.cli import main
+from open_licenseplate.config import SettingsError
+
+SECRET_RTSP_URL = (
+    "rtsp://camera-user:camera-password@example.test/stream"
+    "?password=query-password&token=query-token"
+)
 
 
 def test_db_upgrade_command_runs_first_migration(
@@ -167,3 +173,43 @@ def test_serve_command_passes_explicit_options_to_uvicorn(
     assert called["host"] == "127.0.0.1"
     assert called["port"] == 9000
     assert called["access_log"] is False
+
+
+def test_cli_redacts_settings_errors_before_writing_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def raise_settings_error(_arguments: object) -> int:
+        raise SettingsError(SECRET_RTSP_URL)
+
+    monkeypatch.setattr("open_licenseplate.cli._run_settings_set", raise_settings_error)
+
+    assert main(["settings", "set", "server.port", "9000"]) == 2
+
+    output = capsys.readouterr().err
+    assert "camera-user" not in output
+    assert "camera-password" not in output
+    assert "query-password" not in output
+    assert "query-token" not in output
+    assert "[REDACTED]@" in output
+    assert "password=[REDACTED]" in output
+
+
+def test_cli_redacts_unexpected_errors_before_writing_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def raise_unexpected_error(_arguments: object) -> int:
+        raise RuntimeError(SECRET_RTSP_URL)
+
+    monkeypatch.setattr("open_licenseplate.cli._run_doctor", raise_unexpected_error)
+
+    assert main(["doctor"]) == 1
+
+    output = capsys.readouterr().err
+    assert "camera-user" not in output
+    assert "camera-password" not in output
+    assert "query-password" not in output
+    assert "query-token" not in output
+    assert "[REDACTED]@" in output
+    assert "password=[REDACTED]" in output
