@@ -552,6 +552,8 @@ preprocessing:
 outputs:
   boxes: coordinates
   scores: confidence
+  box_format: xyxy
+  coordinate_space: model_pixels
 labels:
   - license_plate
 defaults:
@@ -568,7 +570,7 @@ conversion:
   arguments: {}
 ```
 
-Output names and adapter configuration must reflect the actual converted artifact. They may not be guessed from the model family.
+Output names and adapter configuration must reflect the actual converted artifact. They may not be guessed from the model family. The manifest must also declare `outputs.box_format` (`xyxy` or `xywh`) and `outputs.coordinate_space` (`model_pixels` or `normalized`). A manifest with `outputs.raw` must declare `outputs.raw_layout` as `candidates_first` (`[N,A]`), `channels_first` (`[1,A,N]`), or `channels_last` (`[1,N,A]`), plus the boolean `outputs.raw_has_objectness`. The adapter must reject undeclared matrix orientation and convert normalized coordinates to model pixels before inverse letterbox mapping.
 
 ### 12.3 Model import validation
 

@@ -21,8 +21,11 @@ The shell includes Live, Events, Jobs, Cameras, Models, and System pages. The
 Cameras page saves safe profiles and opens a source during a connection test.
 The Live page starts and stops one camera at a time. Other future product pages
 use clear empty states until their milestone is complete. The Models page
-provides P07 secure package import and registry operations. It does not load a
-Core ML model or run inference.
+provides secure package import and registry operations. The
+P08 inference package provides a backend-neutral still-image detection
+contract, deterministic letterbox preprocessing, a fake backend for portable
+tests, and an optional Core ML backend for macOS. The existing Models page does
+not yet provide the later still-image browser workflow.
 The System page can save a comfortable or compact display density in the local
 settings table. Camera streaming, preview, model, tracking, and processing
 features arrive in later milestones.
@@ -101,10 +104,12 @@ by that import.
 The manifest is stored as an immutable JSON snapshot. The registry records the
 manifest ID, backend, adapter, source, license, checksum, structural validation
 state, and active state. Imported packages use the
-`pending_runtime_validation` state. Package checks do not make a model
-runtime-valid, so activation remains blocked until a later runtime slice
-records `runtime_valid`. This PR never executes imported files, loads Core ML,
-or runs prediction.
+`pending_runtime_validation` state. On macOS, the Models validate operation
+loads the package, reads its actual Core ML input and output descriptions,
+compares them with the manifest, and runs one deterministic validation
+prediction. It records safe inspection and prediction details before it marks
+the model `runtime_valid`. On other platforms, Core ML validation remains
+pending and the portable fake backend is available for tests.
 
 The browser workflow is available at `/models`. The JSON registry API uses
 `/api/v1/models` with import, read, package validation, activation,
@@ -197,6 +202,42 @@ checks:
 5. Source recovery returns to `streaming`.
 6. Stop closes the preview and cancels a pending reconnect.
 7. `doctor --audit-secrets` reports safe output.
+
+### Still-image inference contracts
+
+Install the project on an Apple Silicon Mac with:
+
+```bash
+uv sync --locked
+```
+
+The supported compute choices are `all`, `cpu_only`, `cpu_and_gpu`, and
+`cpu_and_ne`. Core ML maps these choices to `ct.ComputeUnit.ALL`,
+`CPU_ONLY`, `CPU_AND_GPU`, and `CPU_AND_NE`. A compute-unit change always
+closes the old model instance and loads a new one.
+
+The manifest must declare `outputs.box_format` as `xyxy` or `xywh` and
+`outputs.coordinate_space` as `model_pixels` or `normalized`. Normalized
+coordinates are scaled by the declared model width and height before inverse
+letterbox mapping. A raw output must also declare `raw_layout` as
+`candidates_first` (`[N,A]`), `channels_first` (`[1,A,N]`), or `channels_last`
+(`[1,N,A]`), and must declare `raw_has_objectness`. The adapter does not infer
+box geometry, coordinate space, objectness, or matrix orientation.
+
+The adapter returns source-image pixel boxes only. It applies manifest-defined
+confidence and IoU thresholds, rejects non-finite or invalid candidates,
+clips valid boxes to the source image, and applies deterministic class-wise
+NMS. The manifest output names must match names found in the inspected Core ML
+model. The backend does not infer or guess output names.
+
+To run the optional real Core ML fixture test, set both variables to a local
+managed fixture and run:
+
+```bash
+OPEN_LICENSEPLATE_COREML_PACKAGE=/path/to/model.mlpackage \
+OPEN_LICENSEPLATE_COREML_MANIFEST=/path/to/model-manifest.yaml \
+uv run pytest -m macos
+```
 
 ### Empty development fixture
 

@@ -26,7 +26,12 @@ def _manifest(**overrides: object) -> dict[str, object]:
             "color_space": "rgb",
         },
         "preprocessing": {"resize": "letterbox"},
-        "outputs": {"boxes": "coordinates", "scores": "confidence"},
+        "outputs": {
+            "boxes": "coordinates",
+            "scores": "confidence",
+            "box_format": "xyxy",
+            "coordinate_space": "model_pixels",
+        },
         "labels": ["license_plate"],
         "defaults": {"confidence_threshold": 0.35, "iou_threshold": 0.45},
         "compatibility": {"minimum_macos": "14.0"},
@@ -60,6 +65,8 @@ preprocessing:
 outputs:
   boxes: coordinates
   scores: confidence
+  box_format: xyxy
+  coordinate_space: model_pixels
 labels:
   - license_plate
 defaults:
@@ -96,6 +103,8 @@ def test_manifest_requires_contract_sections(field: str) -> None:
         ("preprocessing", "resize"),
         ("outputs", "boxes"),
         ("outputs", "scores"),
+        ("outputs", "box_format"),
+        ("outputs", "coordinate_space"),
         ("defaults", "confidence_threshold"),
         ("defaults", "iou_threshold"),
     ],
@@ -142,3 +151,66 @@ def test_manifest_rejects_invalid_nested_values() -> None:
 def test_manifest_rejects_non_object_input() -> None:
     with pytest.raises(ModelManifestError, match="input"):
         parse_manifest(_manifest(input=["not", "an", "object"]))
+
+
+def test_manifest_accepts_declared_raw_output_contract() -> None:
+    manifest = parse_manifest(
+        _manifest(
+            outputs={
+                "raw": "predictions",
+                "box_format": "xywh",
+                "coordinate_space": "normalized",
+                "raw_layout": "channels_first",
+                "raw_has_objectness": False,
+            }
+        )
+    )
+
+    assert manifest.raw["outputs"]["raw"] == "predictions"
+
+
+def test_manifest_rejects_non_boolean_raw_objectness() -> None:
+    with pytest.raises(ModelManifestError, match="raw_has_objectness"):
+        parse_manifest(
+            _manifest(
+                outputs={
+                    "raw": "predictions",
+                    "box_format": "xywh",
+                    "coordinate_space": "normalized",
+                    "raw_layout": "channels_first",
+                    "raw_has_objectness": "false",
+                }
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("box_format", "unknown"),
+        ("coordinate_space", "source_pixels"),
+    ],
+)
+def test_manifest_rejects_undeclared_output_geometry(field: str, value: str) -> None:
+    outputs = _manifest()["outputs"]
+    assert isinstance(outputs, dict)
+    outputs = dict(outputs)
+    outputs[field] = value
+
+    with pytest.raises(ModelManifestError, match=field):
+        parse_manifest(_manifest(outputs=outputs))
+
+
+def test_manifest_requires_all_raw_output_metadata() -> None:
+    for missing_field in ("raw_layout", "raw_has_objectness"):
+        outputs = {
+            "raw": "predictions",
+            "box_format": "xywh",
+            "coordinate_space": "normalized",
+            "raw_layout": "channels_first",
+            "raw_has_objectness": False,
+        }
+        del outputs[missing_field]
+
+        with pytest.raises(ModelManifestError, match=missing_field):
+            parse_manifest(_manifest(outputs=outputs))
