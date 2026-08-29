@@ -696,6 +696,129 @@ body.density-compact .status-item {
   margin: 0;
 }
 
+.model-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.model-form-card,
+.model-safety-card,
+.model-list-card {
+  min-width: 0;
+}
+
+.model-form {
+  display: grid;
+  gap: 8px;
+}
+
+.model-form input[type="file"] {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  font: inherit;
+  background: var(--paper-strong);
+}
+
+.model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+}
+
+.model-item {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(245, 240, 231, 0.56);
+}
+
+.model-item-active {
+  border-color: rgba(45, 124, 118, 0.42);
+  box-shadow: inset 4px 0 0 var(--teal);
+}
+
+.model-item-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.model-item h3 {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: 25px;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  overflow-wrap: anywhere;
+}
+
+.model-state {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid rgba(45, 124, 118, 0.24);
+  border-radius: 999px;
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  background: var(--teal-soft);
+}
+
+.model-item .detail-row {
+  grid-template-columns: minmax(75px, 0.7fr) minmax(0, 1.3fr);
+}
+
+.model-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.model-actions form {
+  margin: 0;
+}
+
+.break-code {
+  overflow-wrap: anywhere;
+}
+
+.model-error {
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  color: var(--accent-dark);
+  background: rgba(223, 93, 80, 0.08);
+}
+
+.model-manifest {
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.model-manifest summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.model-manifest[open] summary {
+  margin-bottom: 12px;
+  color: var(--ink);
+}
+
 .quiet-button {
   min-height: 40px;
   padding: 0 13px;
@@ -1051,7 +1174,8 @@ code {
   }
 
   .camera-layout,
-  .camera-grid {
+  .camera-grid,
+  .model-layout {
     grid-template-columns: 1fr;
   }
 

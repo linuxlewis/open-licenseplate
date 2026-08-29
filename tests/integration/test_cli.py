@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from model_helpers import create_model_fixture
 from open_licenseplate.cameras.repository import CameraRepository
 from open_licenseplate.cameras.service import prepare_camera_config
 from open_licenseplate.cli import main
@@ -32,8 +33,32 @@ def test_db_upgrade_command_runs_first_migration(
     )
 
     assert result == 0
-    assert "0002_cameras" in capsys.readouterr().out
+    assert "0003_models" in capsys.readouterr().out
     assert (tmp_path / "data" / "open-licenseplate.sqlite3").is_file()
+
+
+def test_models_import_command_requires_a_migrated_database(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path, archive_path, _manifest = create_model_fixture(tmp_path)
+    result = main(
+        [
+            "models",
+            "import",
+            "--manifest",
+            str(manifest_path),
+            "--archive",
+            str(archive_path),
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--log-dir",
+            str(tmp_path / "logs"),
+        ]
+    )
+
+    assert result == 2
+    assert "database is not ready" in capsys.readouterr().err
 
 
 def test_dev_fixture_command_creates_only_managed_directories(

@@ -99,7 +99,7 @@ def test_system_page_shows_versions_paths_database_and_setting_sources(tmp_path:
 
     assert response.status_code == 200
     assert "0.1.0" in response.text
-    assert "0002_cameras" in response.text
+    assert "0003_models" in response.text
     assert str(database_path) in response.text
     assert "9017" in response.text
     assert "persisted" in response.text

@@ -18,8 +18,10 @@ dependencies = [
     "platformdirs>=4.3,<5",
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
+    "python-multipart>=0.0.20,<1",
     "sqlalchemy>=2.0,<3",
     "uvicorn>=0.32,<1",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
@@ -32,6 +34,7 @@ dev = [
     "playwright>=1.49,<2",
     "pytest>=8.3,<9",
     "ruff>=0.8,<1",
+    "types-PyYAML>=6.0.12,<7",
 ]
 
 [tool.hatch.build.targets.wheel]

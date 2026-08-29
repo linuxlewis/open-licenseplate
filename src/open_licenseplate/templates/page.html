@@ -62,7 +62,7 @@
               <h1>{{ page.title }}</h1>
               <p class="lede">{{ page.description }}</p>
             </div>
-            <span class="page-index" aria-hidden="true">{{ "M1" if page.key in ["live", "cameras"] else "M0" }}</span>
+            <span class="page-index" aria-hidden="true">{{ "M2" if page.key == "models" else ("M1" if page.key in ["live", "cameras"] else "M0") }}</span>
           </div>
 
           {% if page.key == "live" %}
@@ -338,6 +338,180 @@
                 </div>
               {% else %}
                 <p class="form-note">No saved camera profiles yet.</p>
+              {% endif %}
+            </section>
+          {% elif page.key == "models" %}
+            {% if model_feedback %}
+              <div class="notice notice-{{ model_feedback.tone }}" role="status">
+                {{ model_feedback.message }}
+              </div>
+            {% endif %}
+
+            <div class="model-layout">
+              <section class="card model-form-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Secure import</span>
+                    <h2>Add model package</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">NEW</span>
+                </div>
+                <p class="form-note">
+                  Select a manifest and a ZIP archive with one <code>.mlpackage</code> directory.
+                  The package is copied through staging. It is not loaded or executed.
+                </p>
+                {% if database.status == "ok" %}
+                  <form class="model-form" method="post" action="/models/import" enctype="multipart/form-data">
+                    <label class="field-label" for="model-manifest">Manifest</label>
+                    <input id="model-manifest" name="manifest" type="file" required accept=".json,.yaml,.yml">
+
+                    <label class="field-label" for="model-archive">Model archive</label>
+                    <input id="model-archive" name="archive" type="file" required accept=".zip">
+
+                    <button class="save-button" type="submit">Import model</button>
+                  </form>
+                {% else %}
+                  <p class="form-note">
+                    Run the database upgrade command before importing a model.
+                  </p>
+                {% endif %}
+              </section>
+
+              <section class="card model-safety-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Import boundary</span>
+                    <h2>No runtime loading</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">SAFE</span>
+                </div>
+                <dl class="detail-list">
+                  <div class="detail-row">
+                    <dt>Accepted</dt>
+                    <dd><strong>ZIP archive</strong><small>One top-level .mlpackage only</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Rejected</dt>
+                    <dd><strong>Traversal and links</strong><small>Absolute paths, symlinks, duplicates, and executable files</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Storage</dt>
+                    <dd><strong>Immutable package</strong><small>Checksum and manifest snapshot are retained</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Runtime</dt>
+                    <dd><strong>Not started</strong><small>Core ML loading and prediction are out of scope</small></dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            <section class="card card-wide model-list-card">
+              <div class="card-heading">
+                <div>
+                  <span class="eyebrow">Managed registry</span>
+                  <h2>{{ models|length }} model{% if models|length != 1 %}s{% endif %}</h2>
+                </div>
+                <span class="card-icon" aria-hidden="true">LIST</span>
+              </div>
+              {% if models %}
+                <div class="model-grid">
+                  {% for model in models %}
+                    <article class="model-item{% if model.active %} model-item-active{% endif %}">
+                      <div class="model-item-heading">
+                        <div>
+                          <span class="eyebrow">{{ "Active" if model.active else "Inactive" }}</span>
+                          <h3>{{ model.display_name }}</h3>
+                        </div>
+                        <span class="model-state">{{ model.validation_state|replace('_', ' ')|title }}</span>
+                      </div>
+                      <dl class="detail-list">
+                        <div class="detail-row">
+                          <dt>Manifest ID</dt>
+                          <dd><code>{{ model.id }}</code></dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Backend</dt>
+                          <dd>
+                            <strong>{{ model.backend }}</strong>
+                            <small>Adapter: {{ model.adapter }}</small>
+                            <small>
+                              Input:
+                              {{ model.manifest.input.width or "Unknown" }}
+                              x
+                              {{ model.manifest.input.height or "Unknown" }}
+                            </small>
+                          </dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Checksum</dt>
+                          <dd><code class="break-code">{{ model.artifact_sha256 }}</code></dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Source</dt>
+                          <dd>
+                            <strong>{{ model.source.license or "License not declared" }}</strong>
+                            <small>{{ model.source.url or "Source URL not declared" }}</small>
+                          </dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Artifact</dt>
+                          <dd>
+                            <strong>{{ "Available" if model.artifact_exists else "Missing" }}</strong>
+                            <small><code>{{ model.artifact_path }}</code></small>
+                          </dd>
+                        </div>
+                      </dl>
+                      {% if model.validation_details.error %}
+                        <p class="model-error">{{ model.validation_details.error }}</p>
+                      {% else %}
+                        <p class="card-note">
+                          Package checks passed. Runtime validation was not run in this slice.
+                        </p>
+                      {% endif %}
+                      <details class="model-manifest">
+                        <summary>Inspect manifest snapshot</summary>
+                        <dl class="detail-list">
+                          <div class="detail-row">
+                            <dt>Task</dt>
+                            <dd><strong>{{ model.manifest.task or "Not declared" }}</strong></dd>
+                          </div>
+                          <div class="detail-row">
+                            <dt>Labels</dt>
+                            <dd><strong>{{ model.manifest.labels|join(", ") if model.manifest.labels else "Not declared" }}</strong></dd>
+                          </div>
+                          <div class="detail-row">
+                            <dt>Created</dt>
+                            <dd><strong>{{ model.created_at }}</strong></dd>
+                          </div>
+                        </dl>
+                      </details>
+                      <div class="model-actions">
+                        <form method="post" action="/models/{{ model.id }}/validate">
+                          <button class="save-button" type="submit">Validate package</button>
+                        </form>
+                        {% if model.active %}
+                          <form method="post" action="/models/{{ model.id }}/deactivate">
+                            <button class="quiet-button" type="submit">Deactivate</button>
+                          </form>
+                        {% elif model.validation_state == "runtime_valid" %}
+                          <form method="post" action="/models/{{ model.id }}/activate">
+                            <button class="save-button" type="submit">Activate</button>
+                          </form>
+                        {% else %}
+                          <button class="quiet-button" type="button" disabled>
+                            Activation pending P08
+                          </button>
+                        {% endif %}
+                        <form method="post" action="/models/{{ model.id }}/delete">
+                          <button class="quiet-button" type="submit">Delete</button>
+                        </form>
+                      </div>
+                    </article>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <p class="form-note">No managed model packages yet.</p>
               {% endif %}
             </section>
           {% elif page.key == "system" %}

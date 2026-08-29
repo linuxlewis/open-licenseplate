@@ -241,6 +241,7 @@ def test_m0_acceptance_from_fresh_fixture(tmp_path: Path, chromium) -> None:
         "alembic_version",
         "application_settings",
         "cameras",
+        "models",
     }
     assert _setting_keys(database_path) == []
 
@@ -300,5 +301,6 @@ def test_m0_acceptance_from_fresh_fixture(tmp_path: Path, chromium) -> None:
         "alembic_version",
         "application_settings",
         "cameras",
+        "models",
     }
     assert _setting_keys(database_path) == ["ui.density"]
