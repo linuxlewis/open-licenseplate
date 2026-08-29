@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, String, Text, select
+from sqlalchemy import Integer, String, Text, TypeDecorator, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -21,7 +21,6 @@ PERSISTABLE_SETTING_KEYS = frozenset(
         "log_level",
         "server.host",
         "server.port",
-        "server.unsafe_development",
     }
 )
 """Settings that are safe and stable enough for generic persistence.
@@ -35,6 +34,28 @@ class SettingsBase(DeclarativeBase):
     """Base metadata for settings persistence."""
 
 
+class UTCDateTime(TypeDecorator[datetime]):
+    """Store aware UTC timestamps as ISO-8601 text in SQLite."""
+
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, _dialect: Any) -> str | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("updated_at must be timezone-aware")
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    def process_result_value(self, value: str | None, _dialect: Any) -> datetime | None:
+        if value is None:
+            return None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("stored updated_at is not timezone-aware")
+        return parsed.astimezone(UTC)
+
+
 class ApplicationSetting(SettingsBase):
     """One versioned JSON setting value."""
 
@@ -43,7 +64,7 @@ class ApplicationSetting(SettingsBase):
     setting_key: Mapped[str] = mapped_column(String(255), primary_key=True)
     value_json: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
 
 def validate_setting_key(setting_key: str) -> str:
@@ -65,8 +86,6 @@ def _validate_value(setting_key: str, value: Any) -> str:
         isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535
     ):
         raise ValueError("server.port must be an integer from 1 through 65535")
-    if setting_key == "server.unsafe_development" and not isinstance(value, bool):
-        raise ValueError("server.unsafe_development must be a boolean")
     try:
         return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError) as error:

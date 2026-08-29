@@ -1,13 +1,15 @@
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pytest
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from open_licenseplate.cli import main
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import Database, database_status, upgrade_database
-from open_licenseplate.settings_store import SettingsStore
+from open_licenseplate.settings_store import ApplicationSetting, SettingsStore
 
 
 def _database_path(tmp_path: Path) -> Path:
@@ -43,6 +45,24 @@ def test_fresh_database_migration_creates_settings_table(tmp_path: Path) -> None
     assert database_status(database_path)["current_revision"] == "0001_initial"
 
 
+def test_database_status_discovers_head_from_alembic_for_missing_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_head = "head-from-alembic"
+
+    monkeypatch.setattr(
+        ScriptDirectory,
+        "get_current_head",
+        lambda _self: expected_head,
+    )
+
+    status = database_status(_database_path(tmp_path))
+
+    assert status["status"] == "not_initialized"
+    assert status["head_revision"] == expected_head
+
+
 def test_non_secret_setting_is_available_after_restart(tmp_path: Path) -> None:
     database_path = _database_path(tmp_path)
     upgrade_database(database_path)
@@ -61,6 +81,38 @@ def test_non_secret_setting_is_available_after_restart(tmp_path: Path) -> None:
     assert restarted_settings.server.port == 9007
     assert restarted_settings.sources["server.port"] == "persisted"
     assert settings.server.port == 8421
+
+
+def test_persisted_unsafe_development_setting_is_rejected(tmp_path: Path) -> None:
+    database_path = _database_path(tmp_path)
+    upgrade_database(database_path)
+    database = Database(database_path)
+
+    try:
+        with pytest.raises(ValueError, match="not persistable"):
+            SettingsStore(database).set("server.unsafe_development", True)
+    finally:
+        database.dispose()
+
+
+def test_setting_updated_at_round_trip_is_aware_utc(tmp_path: Path) -> None:
+    database_path = _database_path(tmp_path)
+    upgrade_database(database_path)
+    database = Database(database_path)
+
+    try:
+        SettingsStore(database).set("server.port", 9011)
+    finally:
+        database.dispose()
+
+    restarted_database = Database(database_path)
+    try:
+        with restarted_database.session() as session:
+            row = session.get(ApplicationSetting, "server.port")
+            assert row is not None
+            assert row.updated_at.tzinfo is UTC
+    finally:
+        restarted_database.dispose()
 
 
 def test_settings_cli_writes_a_setting_for_the_next_process(tmp_path: Path) -> None:

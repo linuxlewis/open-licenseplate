@@ -21,7 +21,7 @@ def upgrade() -> None:
         sa.Column("setting_key", sa.String(length=255), nullable=False),
         sa.Column("value_json", sa.Text(), nullable=False),
         sa.Column("schema_version", sa.Integer(), nullable=False, server_default="1"),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("updated_at", sa.Text(), nullable=False),
         sa.PrimaryKeyConstraint("setting_key"),
     )
 

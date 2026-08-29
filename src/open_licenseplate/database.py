@@ -28,7 +28,6 @@ SQLite reports ``synchronous = FULL`` as the integer value ``2``.
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_CONFIG_PATH = _REPOSITORY_ROOT / "alembic.ini"
-MIGRATION_HEAD = "0001_initial"
 
 
 class Database:
@@ -121,14 +120,19 @@ def _alembic_config() -> Config:
     return config
 
 
+def _migration_head(config: Config | None = None) -> str:
+    migration_config = config or _alembic_config()
+    head = ScriptDirectory.from_config(migration_config).get_current_head()
+    if head is None:
+        raise RuntimeError("Alembic has no migration head")
+    return head
+
+
 def migration_revisions(connection: Connection) -> tuple[str | None, str]:
     """Return the current database revision and the application head."""
     config = _alembic_config()
     current = MigrationContext.configure(connection).get_current_revision()
-    head = ScriptDirectory.from_config(config).get_current_head()
-    if head is None:
-        raise RuntimeError("Alembic has no migration head")
-    return current, head
+    return current, _migration_head(config)
 
 
 def upgrade_database(path: Path) -> None:
@@ -146,12 +150,13 @@ def upgrade_database(path: Path) -> None:
 def database_status(path: Path) -> dict[str, Any]:
     """Return migration and pragma state without creating a new database file."""
     database_path = path.expanduser()
+    head_revision = _migration_head()
     if not database_path.is_file():
         return {
             "status": "not_initialized",
             "detail": "Database file does not exist; run `open-licenseplate db upgrade`.",
             "current_revision": None,
-            "head_revision": MIGRATION_HEAD,
+            "head_revision": head_revision,
             "pragmas": {},
         }
 
@@ -165,7 +170,7 @@ def database_status(path: Path) -> dict[str, Any]:
             "status": "error",
             "detail": f"Database check failed: {error}",
             "current_revision": None,
-            "head_revision": MIGRATION_HEAD,
+            "head_revision": head_revision,
             "pragmas": {},
         }
     finally:
