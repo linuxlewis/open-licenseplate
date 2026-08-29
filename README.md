@@ -50,8 +50,8 @@ For an environment reference, the variable can contain the complete RTSP URL,
 including credentials. The application stores only the reference and a
 redacted endpoint description in SQLite. It does not return the resolved value
 to the API or browser. The camera test validates the endpoint and credential
-availability; it does not open a network stream until the later FrameSource
-slice is implemented.
+availability; the API does not open a network stream in this slice. The runtime
+source is available through the capture package described below.
 
 The same controls are available on the Cameras page at `/cameras`, and the
 JSON API uses `/api/v1/cameras`.
@@ -64,6 +64,23 @@ uv run open-licenseplate doctor --audit-secrets
 
 The audit reports file names and safe status only. It does not print file
 contents or resolved credential values.
+
+### Frame sources and latest frame delivery
+
+The capture package provides the P05 runtime contract:
+
+- `FrameSource.open()`, `read()`, and `close()` own one capture session.
+- `VideoFrame` keeps host UTC time, host monotonic time, camera PTS, sequence,
+  dimensions, pixel format, and capture-session identity separate.
+- `PyAVRTSPSource` resolves a credential reference only while opening the
+  source, uses TCP by default, selects video only, and applies bounded I/O
+  timeouts.
+- `LatestFrameBroker` has capacity one. A new frame replaces an unread frame.
+- `RecordedVideoSource` and `FakeFrameSource` support deterministic tests.
+- `FrameCaptureWorker` runs blocking source operations on a dedicated thread.
+
+The camera API test remains configuration-only in this slice. The source and
+worker contracts are ready for the later preview lifecycle integration.
 
 ### Empty development fixture
 
