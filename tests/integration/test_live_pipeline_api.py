@@ -93,6 +93,28 @@ def _wait_for_live_state(
     raise AssertionError(f"live pipeline did not reach {state}: {latest}")
 
 
+def _wait_for_camera_frames(
+    client: TestClient,
+    camera_id: str,
+    *,
+    minimum: int,
+    timeout: float = 2.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/cameras/{camera_id}/status")
+        assert response.status_code == 200
+        latest = response.json()
+        if (
+            latest.get("state") == "streaming"
+            and latest.get("metrics", {}).get("captured_frames", 0) >= minimum
+        ):
+            return latest
+        time.sleep(0.005)
+    raise AssertionError(f"camera did not capture enough frames: {latest}")
+
+
 def test_live_api_starts_warms_processes_updates_threshold_and_stops(
     tmp_path: Path,
 ) -> None:
@@ -147,6 +169,52 @@ def test_live_api_starts_warms_processes_updates_threshold_and_stops(
         assert stopped.json()["state"] == "stopped"
         assert fixture.sources and fixture.sources[0].closed.is_set()
         assert backend.closes and all(model.closed for model in backend.closes)
+
+
+def test_live_generation_metrics_exclude_existing_preview_frames(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    fixture = _source_fixture()
+    backend = FakeBackend(output_factory=_outputs)
+
+    with TestClient(
+        create_app(
+            settings,
+            source_factory=fixture,
+            inference_backend_factory=lambda: backend,
+        )
+    ) as client:
+        camera_id = _create_camera(client, "Fixture")
+        model_id = _import_and_validate(client, tmp_path, "baseline-model")
+        assert client.post(f"/api/v1/cameras/{camera_id}/start").status_code == 200
+        before = _wait_for_camera_frames(client, camera_id, minimum=20)
+        before_metrics = before["metrics"]
+
+        started = client.post(
+            "/api/v1/live/start",
+            json={"camera_id": camera_id, "model_id": model_id},
+        )
+        assert started.status_code == 200
+        _wait_for_live_state(client, "running")
+
+        deadline = time.monotonic() + 2
+        live_state = client.get("/api/v1/live/state").json()
+        while live_state["metrics"]["processed_frames"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+            live_state = client.get("/api/v1/live/state").json()
+        after = client.get(f"/api/v1/cameras/{camera_id}/status").json()
+
+        live_captured = live_state["metrics"]["captured_frames"]
+        live_replaced = live_state["metrics"]["source_replacement_count"]
+        assert live_captured > 0
+        assert live_captured < after["metrics"]["captured_frames"]
+        assert live_captured <= (
+            after["metrics"]["captured_frames"] - before_metrics["captured_frames"]
+        )
+        assert live_replaced <= (
+            after["metrics"]["replaced_frames"] - before_metrics["replaced_frames"]
+        )
+        client.post("/api/v1/live/stop")
 
 
 def test_live_api_rejects_camera_and_model_switch_while_running(tmp_path: Path) -> None:

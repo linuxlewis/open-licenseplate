@@ -266,6 +266,8 @@ class _PipelineGeneration:
     stop_requested: threading.Event
     threshold: float
     region_of_interest: SourcePixelRegionOfInterest | None
+    captured_frames_baseline: int
+    source_replacement_baseline: int
 
 
 @dataclass
@@ -345,6 +347,14 @@ class LivePipelineCoordinator:
         active_camera_id = self.camera_runtime.active_camera_id
         if active_camera_id is not None and active_camera_id != camera_id:
             raise LivePipelineConflict("stop the active live pipeline before switching the camera")
+        runtime_was_active = active_camera_id == camera_id
+        runtime_metrics = self.camera_runtime.status(camera_id).metrics
+        captured_frames_baseline = (
+            _metric_value(runtime_metrics, "captured_frames") if runtime_was_active else 0
+        )
+        source_replacement_baseline = (
+            _metric_value(runtime_metrics, "replaced_frames") if runtime_was_active else 0
+        )
 
         with self._condition:
             if self._thread is not None and self._thread.is_alive():
@@ -378,6 +388,8 @@ class LivePipelineCoordinator:
                 stop_requested=threading.Event(),
                 threshold=effective_threshold,
                 region_of_interest=region_of_interest,
+                captured_frames_baseline=captured_frames_baseline,
+                source_replacement_baseline=source_replacement_baseline,
             )
             self._generation = generation
             self._model_checksum = model.artifact_sha256
@@ -687,18 +699,23 @@ class LivePipelineCoordinator:
             self._last_result = result
             self._metrics = replace(
                 self._metrics,
-                captured_frames=max(
-                    self._metrics.captured_frames,
-                    int(source_metrics.get("captured_frames", 0)),
+                captured_frames=_metric_delta(
+                    source_metrics,
+                    "captured_frames",
+                    generation.captured_frames_baseline,
                 ),
                 processed_frames=self._metrics.processed_frames + 1,
                 capture_age_ms=capture_age_ms,
                 preprocessing_ms=_nonnegative(crop_ms + run.preprocessing_ms),
                 prediction_ms=_nonnegative(run.inference_ms),
                 postprocessing_ms=_nonnegative(run.postprocessing_ms),
-                end_to_end_ms=_nonnegative(run.total_ms + crop_ms),
+                end_to_end_ms=capture_age_ms,
                 processed_fps=processed_fps,
-                source_replacement_count=int(source_metrics.get("replaced_frames", 0)),
+                source_replacement_count=_metric_delta(
+                    source_metrics,
+                    "replaced_frames",
+                    generation.source_replacement_baseline,
+                ),
                 inference_replacement_count=inference_metrics.replaced_frames,
                 rejected_candidates=detections.rejected_count,
             )
@@ -760,7 +777,7 @@ class LivePipelineCoordinator:
         camera_id = None if generation is None else generation.camera_id
         camera_payload: dict[str, Any] | None = None
         metrics = self._metrics
-        if camera_id is not None:
+        if camera_id is not None and generation is not None:
             runtime_status = self.camera_runtime.status(camera_id)
             camera_payload = runtime_status.as_dict()
             runtime_metrics = runtime_status.metrics
@@ -769,11 +786,19 @@ class LivePipelineCoordinator:
                 metrics,
                 captured_frames=max(
                     metrics.captured_frames,
-                    int(runtime_metrics.get("captured_frames", 0)),
+                    _metric_delta(
+                        runtime_metrics,
+                        "captured_frames",
+                        generation.captured_frames_baseline,
+                    ),
                 ),
                 source_replacement_count=max(
                     metrics.source_replacement_count,
-                    int(runtime_metrics.get("replaced_frames", 0)),
+                    _metric_delta(
+                        runtime_metrics,
+                        "replaced_frames",
+                        generation.source_replacement_baseline,
+                    ),
                 ),
                 inference_replacement_count=max(
                     metrics.inference_replacement_count,
@@ -970,6 +995,18 @@ def _detection_payload(detection: Detection) -> dict[str, Any]:
         "model_checksum": detection.model_sha256,
         "frame_sequence": detection.frame_sequence,
     }
+
+
+def _metric_value(metrics: Mapping[str, Any], name: str) -> int:
+    try:
+        value = int(metrics.get(name, 0))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)
+
+
+def _metric_delta(metrics: Mapping[str, Any], name: str, baseline: int) -> int:
+    return max(0, _metric_value(metrics, name) - max(0, baseline))
 
 
 def _safe_camera_payload(camera: Mapping[str, Any]) -> dict[str, Any] | None:

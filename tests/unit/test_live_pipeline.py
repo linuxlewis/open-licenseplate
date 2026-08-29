@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
@@ -69,18 +71,40 @@ def _outputs(_prepared: Any) -> dict[str, Any]:
     }
 
 
-def _runtime(sources: list[FakeFrameSource]) -> CameraRuntime:
+class ManualClock:
+    def __init__(self) -> None:
+        self.wall = datetime(2026, 8, 29, tzinfo=UTC)
+        self.ticks = 0.0
+
+    def now(self) -> datetime:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.ticks
+
+    def advance(self, seconds: float) -> None:
+        self.ticks += seconds
+
+
+def _runtime(
+    sources: list[FakeFrameSource],
+    *,
+    clock: Any | None = None,
+    read_gate: threading.Event | None = None,
+) -> CameraRuntime:
     def source_factory(camera: Any, camera_id: str) -> FakeFrameSource:
         source = FakeFrameSource(
             [np.full((8, 8, 3), 40, dtype=np.uint8)],
             camera_id=camera_id,
             repeat=True,
             read_interval_seconds=0.002,
+            clock=clock,
+            read_gate=read_gate,
         )
         sources.append(source)
         return source
 
-    return CameraRuntime(source_factory, poll_interval_seconds=0.002)
+    return CameraRuntime(source_factory, clock=clock, poll_interval_seconds=0.002)
 
 
 def _wait_processed(
@@ -207,6 +231,46 @@ def test_live_pipeline_replaces_old_frames_during_slow_inference() -> None:
     coordinator.stop()
 
 
+def test_end_to_end_metric_includes_capture_wait_and_slow_prediction() -> None:
+    sources: list[FakeFrameSource] = []
+    clock = ManualClock()
+    read_gate = threading.Event()
+    prediction_calls = 0
+
+    def slow_outputs(_prepared: Any) -> dict[str, Any]:
+        nonlocal prediction_calls
+        prediction_calls += 1
+        if prediction_calls > 1:
+            clock.advance(2.0)
+        return _outputs(_prepared)
+
+    runtime = _runtime(sources, clock=clock, read_gate=read_gate)
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: FakeBackend(output_factory=slow_outputs),
+        clock=clock,
+        poll_interval_seconds=0.002,
+    )
+    coordinator.start("camera-1", _camera(), _descriptor())
+    coordinator.wait_for_state("running")
+    clock.advance(1.0)
+    read_gate.set()
+
+    processed = _wait_processed(coordinator)
+    assert processed.metrics.end_to_end_ms is not None
+    assert processed.metrics.end_to_end_ms >= 2000.0
+    stage_total = sum(
+        value or 0.0
+        for value in (
+            processed.metrics.preprocessing_ms,
+            processed.metrics.prediction_ms,
+            processed.metrics.postprocessing_ms,
+        )
+    )
+    assert processed.metrics.end_to_end_ms >= stage_total
+    coordinator.stop()
+
+
 def test_latest_frame_inference_handoff_is_capacity_one() -> None:
     broker = LatestFrameBroker()
     subscription = broker.subscribe()
@@ -224,8 +288,6 @@ def test_latest_frame_inference_handoff_is_capacity_one() -> None:
 
 
 def _frame(sequence: int, *, received_monotonic: float) -> Any:
-    from datetime import UTC, datetime
-
     from open_licenseplate.capture import VideoFrame
 
     return VideoFrame(
