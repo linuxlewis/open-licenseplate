@@ -18,6 +18,7 @@ class ManagedPaths:
     models: Path
     artifacts: Path
     staging: Path
+    settings: Path
     log_dir: Path
     app_log: Path
     worker_log: Path
@@ -32,6 +33,7 @@ class ManagedPaths:
             models=data_dir / "models",
             artifacts=data_dir / "artifacts",
             staging=data_dir / "staging",
+            settings=data_dir / "settings.json",
             log_dir=log_dir,
             app_log=log_dir / "app.log",
             worker_log=log_dir / "worker.log",

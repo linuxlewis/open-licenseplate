@@ -7,7 +7,7 @@ Local-first license plate detection for Apple Silicon macOS.
 Install Python 3.12 and `uv`, then run:
 
 ```bash
-uv sync
+uv sync --locked
 uv run open-licenseplate serve
 ```
 

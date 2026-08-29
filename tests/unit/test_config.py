@@ -16,11 +16,9 @@ def test_settings_precedence_is_cli_then_environment_then_default(
 
     assert settings.server.port == 9003
     assert settings.log_level == "DEBUG"
-    assert settings.live.detection_confidence == 0.35
     assert settings.server.host == "127.0.0.1"
     assert settings.sources["server.port"] == "cli"
     assert settings.sources["log_level"] == "environment"
-    assert settings.sources["live.detection_confidence"] == "default"
     assert settings.sources["server.host"] == "default"
 
 
@@ -43,11 +41,4 @@ def test_non_loopback_binding_requires_explicit_unsafe_flag() -> None:
     with pytest.raises(ValidationError):
         load_settings(
             cli_overrides={"server.host": "0.0.0.0"},
-        )
-
-
-def test_typed_enum_settings_reject_unknown_values() -> None:
-    with pytest.raises(ValidationError):
-        load_settings(
-            cli_overrides={"live.compute_units": "neural_engine_only"},
         )

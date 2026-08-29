@@ -58,48 +58,6 @@ class StorageSettings(BaseModel):
     log_dir: Path = Field(default_factory=lambda: Path(user_log_dir("open-licenseplate")))
 
 
-class LiveSettings(BaseModel):
-    """Defaults for the live pipeline."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    preview_fps: float = Field(default=10.0, gt=0)
-    preview_jpeg_quality: int = Field(default=80, ge=1, le=100)
-    detection_confidence: float = Field(default=0.35, ge=0, le=1)
-    compute_units: Literal["all", "cpu_only", "cpu_and_gpu", "cpu_and_ne"] = "all"
-
-
-class TrackingSettings(BaseModel):
-    """Defaults for track aggregation."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    confirmation_hits: int = Field(default=3, ge=1)
-    close_after_seconds: float = Field(default=1.0, gt=0)
-    retained_crops: int = Field(default=3, ge=1)
-
-
-class WorkerSettings(BaseModel):
-    """Defaults for a future durable worker."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    poll_interval_seconds: float = Field(default=1.0, gt=0)
-    lease_seconds: float = Field(default=60.0, gt=0)
-    heartbeat_seconds: float = Field(default=20.0, gt=0)
-    default_max_attempts: int = Field(default=5, ge=1)
-
-
-class RetentionSettings(BaseModel):
-    """Defaults for future managed-data retention."""
-
-    model_config = ConfigDict(extra="ignore")
-
-    event_metadata_days: int = Field(default=90, ge=1)
-    crop_days: int = Field(default=30, ge=1)
-    result_days: int = Field(default=90, ge=1)
-
-
 class AppSettings(BaseSettings):
     """Effective settings after default, environment, and CLI layers."""
 
@@ -115,10 +73,6 @@ class AppSettings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     server: ServerSettings = Field(default_factory=ServerSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
-    live: LiveSettings = Field(default_factory=LiveSettings)
-    tracking: TrackingSettings = Field(default_factory=TrackingSettings)
-    worker: WorkerSettings = Field(default_factory=WorkerSettings)
-    retention: RetentionSettings = Field(default_factory=RetentionSettings)
 
     _sources: dict[str, str] = PrivateAttr(default_factory=dict)
 

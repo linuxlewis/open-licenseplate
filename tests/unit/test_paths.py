@@ -21,6 +21,7 @@ def test_managed_paths_have_expected_layout(tmp_path: Path) -> None:
     assert paths.models == tmp_path / "data" / "models"
     assert paths.artifacts == tmp_path / "data" / "artifacts"
     assert paths.staging == tmp_path / "data" / "staging"
+    assert paths.settings == tmp_path / "data" / "settings.json"
     assert paths.app_log == tmp_path / "logs" / "app.log"
     assert all(directory.is_dir() for directory in paths.all_directories)
 
