@@ -6,7 +6,7 @@ import pytest
 from open_licenseplate.cli import main
 
 
-def test_db_upgrade_command_is_a_p01_placeholder(
+def test_db_upgrade_command_runs_first_migration(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -21,12 +21,12 @@ def test_db_upgrade_command_is_a_p01_placeholder(
         ]
     )
 
-    assert result == 1
-    assert "Database support arrives in P01" in capsys.readouterr().err
-    assert not (tmp_path / "data").exists()
+    assert result == 0
+    assert "0001_initial" in capsys.readouterr().out
+    assert (tmp_path / "data" / "open-licenseplate.sqlite3").is_file()
 
 
-def test_doctor_reports_unmigrated_data_directory(
+def test_doctor_reports_uninitialized_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     result = main(
@@ -36,10 +36,10 @@ def test_doctor_reports_unmigrated_data_directory(
     assert result == 1
     output = capsys.readouterr().out
     assert "result: not ready" in output
-    assert "Database support arrives in P01" in output
+    assert "database: not_initialized" in output
 
 
-def test_doctor_json_reports_truthful_pre_database_state(
+def test_doctor_json_reports_uninitialized_database(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -57,7 +57,29 @@ def test_doctor_json_reports_truthful_pre_database_state(
     assert result == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ready"] is False
-    assert payload["database"]["status"] == "not_implemented"
+    assert payload["database"]["status"] == "not_initialized"
+
+
+def test_doctor_reports_ready_after_database_upgrade(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    arguments = [
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+
+    assert main(["db", "upgrade", *arguments]) == 0
+    capsys.readouterr()
+
+    result = main(["doctor", *arguments])
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "database: ok" in output
+    assert "result: ready" in output
 
 
 def test_serve_command_passes_explicit_options_to_uvicorn(

@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import AppSettings, load_settings
+from .database import database_status
 from .logging import configure_logging
 from .paths import ManagedPaths
 
@@ -21,7 +22,9 @@ logger = logging.getLogger("open_licenseplate")
 def _readiness_payload(settings: AppSettings, paths: ManagedPaths) -> tuple[dict[str, Any], int]:
     directories = paths.directory_checks()
     directories_ready = all(directories.values())
-    ready = False
+    database = database_status(paths.database)
+    database_ready = database["status"] == "ok"
+    ready = directories_ready and database_ready
     payload = {
         "status": "ready" if ready else "not_ready",
         "checks": {
@@ -30,10 +33,7 @@ def _readiness_payload(settings: AppSettings, paths: ManagedPaths) -> tuple[dict
                 "status": "ok" if directories_ready else "not_ready",
                 "details": directories,
             },
-            "database": {
-                "status": "not_implemented",
-                "detail": "Database support arrives in P01.",
-            },
+            "database": database,
         },
         "settings": {
             "server.host": {
@@ -66,7 +66,6 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
                 "environment": effective_settings.environment,
             },
         )
-        logger.warning("application readiness is deferred until database support arrives in P01")
         try:
             yield
         finally:

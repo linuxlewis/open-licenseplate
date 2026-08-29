@@ -12,8 +12,10 @@ from typing import Any
 
 from .app import create_app
 from .config import SettingsError, load_settings
+from .database import Database, database_status, upgrade_database
 from .logging import configure_logging
 from .paths import ManagedPaths
+from .settings_store import SettingsStore, validate_setting_key
 
 logger = logging.getLogger("open_licenseplate.cli")
 
@@ -42,9 +44,19 @@ def build_parser() -> argparse.ArgumentParser:
     db_commands = db_parser.add_subparsers(dest="db_command")
     upgrade_parser = db_commands.add_parser(
         "upgrade",
-        help="database upgrade placeholder",
+        help="upgrade the database to the current migration",
     )
     _add_runtime_options(upgrade_parser)
+
+    settings_parser = commands.add_parser(
+        "settings",
+        help="persist non-secret application settings",
+    )
+    settings_commands = settings_parser.add_subparsers(dest="settings_command")
+    set_parser = settings_commands.add_parser("set", help="persist one setting")
+    set_parser.add_argument("setting_key")
+    set_parser.add_argument("value")
+    _add_runtime_options(set_parser)
 
     doctor_parser = commands.add_parser("doctor", help="check local application readiness")
     doctor_parser.add_argument("--json", action="store_true", help="write diagnostics as JSON")
@@ -99,16 +111,66 @@ def _run_serve(arguments: argparse.Namespace) -> int:
 
 
 def _run_database_upgrade(arguments: argparse.Namespace) -> int:
-    _load_cli_settings(arguments)
-    print(
-        "Database support arrives in P01; `db upgrade` is not available in P00.",
-        file=sys.stderr,
+    settings = load_settings(
+        cli_overrides=_cli_overrides(arguments),
+        include_persisted=False,
     )
-    return 1
+    paths = ManagedPaths.from_settings(settings)
+    paths.ensure_directories()
+    upgrade_database(paths.database)
+    status = database_status(paths.database)
+    print(
+        f"Database upgraded to {status['current_revision']} at {paths.database}",
+    )
+    return 0
+
+
+def _parse_setting_value(raw_value: str) -> Any:
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        return raw_value
+
+
+def _run_settings_set(arguments: argparse.Namespace) -> int:
+    settings, paths = _load_cli_settings(arguments)
+    setting_key = validate_setting_key(arguments.setting_key)
+    value = _parse_setting_value(arguments.value)
+
+    candidate = settings.model_dump(mode="python")
+    candidate = _merge_for_cli(candidate, setting_key, value)
+    type(settings).model_validate(candidate)
+
+    status = database_status(paths.database)
+    if status["status"] != "ok":
+        raise SettingsError(
+            "database is not ready; run `open-licenseplate db upgrade` before saving settings"
+        )
+
+    database = Database(paths.database)
+    try:
+        SettingsStore(database).set(setting_key, value)
+    finally:
+        database.dispose()
+    print(f"Saved setting {setting_key}.")
+    return 0
+
+
+def _merge_for_cli(base: dict[str, Any], setting_key: str, value: Any) -> dict[str, Any]:
+    cursor = base
+    parts = setting_key.split(".")
+    for part in parts[:-1]:
+        child = cursor.get(part)
+        if not isinstance(child, dict):
+            raise SettingsError(f"setting path is not an object: {setting_key}")
+        cursor = child
+    cursor[parts[-1]] = value
+    return base
 
 
 def _doctor_payload(settings: Any, paths: ManagedPaths) -> tuple[dict[str, Any], bool]:
     directories = paths.directory_checks()
+    database = database_status(paths.database)
     payload = {
         "application": settings.app_name,
         "configuration": {
@@ -125,11 +187,8 @@ def _doctor_payload(settings: Any, paths: ManagedPaths) -> tuple[dict[str, Any],
             "log_dir": str(paths.log_dir),
         },
         "directories": directories,
-        "database": {
-            "status": "not_implemented",
-            "detail": "Database support arrives in P01.",
-        },
-        "ready": False,
+        "database": database,
+        "ready": all(directories.values()) and database["status"] == "ok",
     }
     return payload, bool(payload["ready"])
 
@@ -148,6 +207,8 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
         database = payload["database"]
         print(f"database: {database['status']}")
         print(f"database detail: {database['detail']}")
+        if database["current_revision"] is not None:
+            print(f"database revision: {database['current_revision']}")
         print(f"result: {'ready' if ready else 'not ready'}")
     return 0 if ready else 1
 
@@ -161,6 +222,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_serve(arguments)
         if arguments.command == "db" and arguments.db_command == "upgrade":
             return _run_database_upgrade(arguments)
+        if arguments.command == "settings" and arguments.settings_command == "set":
+            return _run_settings_set(arguments)
         if arguments.command == "doctor":
             return _run_doctor(arguments)
     except (SettingsError, ValueError) as error:

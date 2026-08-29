@@ -25,8 +25,12 @@ class ManagedPaths:
 
     @classmethod
     def from_settings(cls, settings: AppSettings) -> ManagedPaths:
-        data_dir = settings.storage.data_dir.expanduser()
-        log_dir = settings.storage.log_dir.expanduser()
+        return cls.from_roots(settings.storage.data_dir, settings.storage.log_dir)
+
+    @classmethod
+    def from_roots(cls, data_dir: Path, log_dir: Path) -> ManagedPaths:
+        data_dir = data_dir.expanduser()
+        log_dir = log_dir.expanduser()
         return cls(
             data_dir=data_dir,
             database=data_dir / "open-licenseplate.sqlite3",

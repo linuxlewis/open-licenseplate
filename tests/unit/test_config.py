@@ -7,8 +7,10 @@ from open_licenseplate.config import load_settings
 
 
 def test_settings_precedence_is_cli_then_environment_then_default(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("OPEN_LICENSEPLATE_STORAGE__DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("OPEN_LICENSEPLATE_SERVER__PORT", "9002")
     monkeypatch.setenv("OPEN_LICENSEPLATE_LOG_LEVEL", "DEBUG")
 
@@ -37,7 +39,12 @@ def test_environment_settings_support_nested_names(
     assert settings.server.unsafe_development is True
 
 
-def test_non_loopback_binding_requires_explicit_unsafe_flag() -> None:
+def test_non_loopback_binding_requires_explicit_unsafe_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPEN_LICENSEPLATE_STORAGE__DATA_DIR", str(tmp_path / "data"))
+
     with pytest.raises(ValidationError):
         load_settings(
             cli_overrides={"server.host": "0.0.0.0"},

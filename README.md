@@ -8,16 +8,27 @@ Install Python 3.12 and `uv`, then run:
 
 ```bash
 uv sync --locked
+uv run open-licenseplate db upgrade
 uv run open-licenseplate serve
 ```
 
 The server binds to `127.0.0.1` by default. Open `http://127.0.0.1:8421/` in a
-browser. The P00 slice provides startup, health checks, managed paths, and
-diagnostics. Database support arrives in P01. Camera, model, tracking, and
-processing features arrive in later milestones.
+browser. The M0 slice provides startup, health checks, managed paths,
+diagnostics, SQLite persistence, and the first migration. Camera, model,
+tracking, and processing features arrive in later milestones.
 
-The `db upgrade` command is present as a command-shell placeholder. It reports
-that database support arrives in P01 and does not modify local data.
+`db upgrade` creates or upgrades the managed SQLite database. The database uses
+WAL mode, full synchronous writes, foreign keys, and a 5-second busy timeout.
+
+Persist one safe application setting with:
+
+```bash
+uv run open-licenseplate settings set server.port 9000
+```
+
+Configuration precedence is CLI, environment, persisted setting, then built-in
+default. Database settings contain only non-secret application values. Camera
+credentials and other secrets are not supported by this generic settings store.
 
 Run focused checks with:
 
