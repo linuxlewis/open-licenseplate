@@ -26,6 +26,35 @@ def test_db_upgrade_command_runs_first_migration(
     assert (tmp_path / "data" / "open-licenseplate.sqlite3").is_file()
 
 
+def test_dev_fixture_command_creates_only_managed_directories(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+
+    result = main(
+        [
+            "dev",
+            "fixture",
+            "--data-dir",
+            str(data_dir),
+            "--log-dir",
+            str(log_dir),
+        ]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert "Empty development fixture ready" in output
+    assert "No camera, model, plate, event, job, or OCR data was created." in output
+    assert (data_dir / "models").is_dir()
+    assert (data_dir / "artifacts").is_dir()
+    assert (data_dir / "staging").is_dir()
+    assert not (data_dir / "open-licenseplate.sqlite3").exists()
+    assert not (data_dir / "settings.json").exists()
+
+
 def test_doctor_reports_uninitialized_database(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
