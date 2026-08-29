@@ -1,22 +1,36 @@
-"""FastAPI application factory and health endpoints."""
+"""FastAPI application factory, page routes, and health endpoints."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from html import escape
 from typing import Any
 
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .config import AppSettings, load_settings
 from .database import database_status
 from .logging import configure_logging
 from .paths import ManagedPaths
+from .web import STATIC_DIRECTORY, render_page
 
 logger = logging.getLogger("open_licenseplate")
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self'; "
+    "img-src 'self' data:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'"
+)
 
 
 def _readiness_payload(settings: AppSettings, paths: ManagedPaths) -> tuple[dict[str, Any], int]:
@@ -74,24 +88,50 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     application = FastAPI(
         title=effective_settings.app_name,
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
     application.state.settings = effective_settings
     application.state.paths = paths
     application.state.startup_complete = False
+    application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
 
-    @application.get("/", response_class=HTMLResponse)
-    async def home() -> str:
-        name = escape(effective_settings.app_name)
-        return (
-            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-            f"<title>{name}</title></head><body>"
-            f"<h1>{name}</h1><p>Application shell is running.</p>"
-            "<ul><li><a href='/api/v1/health/live'>Liveness</a></li>"
-            "<li><a href='/api/v1/health/ready'>Readiness</a></li></ul>"
-            "</body></html>"
-        )
+    @application.middleware("http")
+    async def add_security_headers(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    @application.get("/", include_in_schema=False)
+    async def home() -> RedirectResponse:
+        return RedirectResponse("/live", status_code=307)
+
+    @application.get("/live", name="live_page", include_in_schema=False)
+    async def live_page(request: Request) -> Any:
+        return render_page(request, effective_settings, paths, "live")
+
+    @application.get("/events", name="events_page", include_in_schema=False)
+    async def events_page(request: Request) -> Any:
+        return render_page(request, effective_settings, paths, "events")
+
+    @application.get("/jobs", name="jobs_page", include_in_schema=False)
+    async def jobs_page(request: Request) -> Any:
+        return render_page(request, effective_settings, paths, "jobs")
+
+    @application.get("/cameras", name="cameras_page", include_in_schema=False)
+    async def cameras_page(request: Request) -> Any:
+        return render_page(request, effective_settings, paths, "cameras")
+
+    @application.get("/models", name="models_page", include_in_schema=False)
+    async def models_page(request: Request) -> Any:
+        return render_page(request, effective_settings, paths, "models")
+
+    @application.get("/system", name="system_page", include_in_schema=False)
+    async def system_page(request: Request) -> Any:
+        return render_page(request, effective_settings, paths, "system")
 
     @application.get("/api/v1/health/live")
     async def live_health() -> dict[str, str]:

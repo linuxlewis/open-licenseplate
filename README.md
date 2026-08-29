@@ -14,8 +14,10 @@ uv run open-licenseplate serve
 
 The server binds to `127.0.0.1` by default. Open `http://127.0.0.1:8421/` in a
 browser. The M0 slice provides startup, health checks, managed paths,
-diagnostics, SQLite persistence, and the first migration. Camera, model,
-tracking, and processing features arrive in later milestones.
+diagnostics, SQLite persistence, the first migration, and a Jinja/HTMX shell.
+The shell includes Live, Events, Jobs, Cameras, Models, and System pages. The
+future product pages use clear empty states until their milestone is complete.
+Camera, model, tracking, and processing features arrive in later milestones.
 
 `db upgrade` creates or upgrades the managed SQLite database. The database uses
 WAL mode, full synchronous writes, foreign keys, and a 5-second busy timeout.
@@ -34,7 +36,12 @@ Run focused checks with:
 
 ```bash
 uv run pytest
+uv run pytest -m browser
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src
 ```
+
+The browser smoke test uses a local Chromium executable. Set
+`OPEN_LICENSEPLATE_CHROMIUM` when Chromium is not installed in a standard
+location.
