@@ -9,6 +9,8 @@
     <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
     {% if page.key == "live" %}
       <script src="{{ request.url_for('static', path='live.js') }}" defer></script>
+    {% elif page.key == "models" %}
+      <script type="module" src="{{ request.url_for('static', path='model-detection.js') }}" defer></script>
     {% endif %}
   </head>
   <body class="density-{{ ui_density }}">
@@ -358,7 +360,8 @@
                 </div>
                 <p class="form-note">
                   Select a manifest and a ZIP archive with one <code>.mlpackage</code> directory.
-                  The package is copied through staging. It is not loaded or executed.
+                  The package is copied through staging, checked, and then validated by the
+                  selected backend.
                 </p>
                 {% if database.status == "ok" %}
                   <form class="model-form" method="post" action="/models/import" enctype="multipart/form-data">
@@ -400,7 +403,7 @@
                   </div>
                   <div class="detail-row">
                     <dt>Runtime</dt>
-                    <dd><strong>Not started</strong><small>Core ML loading and prediction are out of scope</small></dd>
+                    <dd><strong>Optional Core ML</strong><small>Fake backend tests run on every platform</small></dd>
                   </div>
                 </dl>
               </section>
@@ -464,9 +467,14 @@
                       </dl>
                       {% if model.validation_details.error %}
                         <p class="model-error">{{ model.validation_details.error }}</p>
+                      {% elif model.validation_state == "runtime_valid" %}
+                        <p class="card-note">
+                          Runtime validation passed. The still-image workflow is ready.
+                        </p>
                       {% else %}
                         <p class="card-note">
-                          Package checks passed. Runtime validation was not run in this slice.
+                          Package checks passed. Runtime validation was not run. Run it before
+                          image detection.
                         </p>
                       {% endif %}
                       <details class="model-manifest">
@@ -486,6 +494,38 @@
                           </div>
                         </dl>
                       </details>
+                      {% if model.validation_details.inspection %}
+                        <details class="model-manifest">
+                          <summary>Inspect runtime validation</summary>
+                          <dl class="detail-list">
+                            <div class="detail-row">
+                              <dt>Runtime</dt>
+                              <dd>
+                                <strong>{{ model.validation_details.runtime_validation|replace('_', ' ')|title }}</strong>
+                                {% if model.validation_details.compute_units %}
+                                  <small>Compute units: {{ model.validation_details.compute_units }}</small>
+                                {% endif %}
+                              </dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Inputs</dt>
+                              <dd>
+                                {% for feature in model.validation_details.inspection.inputs %}
+                                  <small><code>{{ feature.name }}</code> ({{ feature.kind }})</small>
+                                {% endfor %}
+                              </dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Outputs</dt>
+                              <dd>
+                                {% for feature in model.validation_details.inspection.outputs %}
+                                  <small><code>{{ feature.name }}</code> ({{ feature.kind }})</small>
+                                {% endfor %}
+                              </dd>
+                            </div>
+                          </dl>
+                        </details>
+                      {% endif %}
                       <div class="model-actions">
                         <form method="post" action="/models/{{ model.id }}/validate">
                           <button class="save-button" type="submit">Validate package</button>
@@ -500,13 +540,118 @@
                           </form>
                         {% else %}
                           <button class="quiet-button" type="button" disabled>
-                            Activation pending P08
+                            Runtime validation required
                           </button>
                         {% endif %}
                         <form method="post" action="/models/{{ model.id }}/delete">
                           <button class="quiet-button" type="submit">Delete</button>
                         </form>
                       </div>
+                      {% if model.validation_state == "runtime_valid" and model.artifact_exists %}
+                        <section class="still-image-workflow" data-model-detection>
+                          <div class="workflow-heading">
+                            <div>
+                              <span class="eyebrow">M2 still image</span>
+                              <h4>Detect one image</h4>
+                            </div>
+                            <span class="workflow-badge">NO STORAGE</span>
+                          </div>
+                          <p class="form-note">
+                            The original JPEG or PNG is returned for display. It is not saved
+                            as an artifact.
+                          </p>
+                          <form
+                            class="still-image-form"
+                            data-detection-form
+                            action="/api/v1/models/{{ model.id }}/detect-image"
+                            enctype="multipart/form-data"
+                          >
+                            <label class="field-label" for="model-image-{{ model.id }}">Image</label>
+                            <input
+                              id="model-image-{{ model.id }}"
+                              name="image"
+                              type="file"
+                              accept="image/jpeg,image/png"
+                              required
+                              data-image-input
+                            >
+                            <div class="still-image-controls">
+                              <label class="field-label" for="model-threshold-{{ model.id }}">
+                                Confidence threshold
+                              </label>
+                              <input
+                                id="model-threshold-{{ model.id }}"
+                                name="confidence_threshold"
+                                type="number"
+                                min="0"
+                                max="1"
+                                step="0.01"
+                                value="{{ model.manifest.defaults.confidence_threshold }}"
+                                data-confidence-input
+                              >
+                              <label class="field-label" for="model-compute-{{ model.id }}">
+                                Compute units
+                              </label>
+                              <select
+                                id="model-compute-{{ model.id }}"
+                                name="compute_units"
+                                data-compute-input
+                              >
+                                <option value="all">All</option>
+                                <option value="cpu_only">CPU only</option>
+                                <option value="cpu_and_gpu">CPU and GPU</option>
+                                <option value="cpu_and_ne">CPU and Neural Engine</option>
+                              </select>
+                            </div>
+                            <button class="save-button" type="submit" data-detect-button>
+                              Detect image
+                            </button>
+                          </form>
+                          <div class="still-image-status" role="status" aria-live="polite" data-detection-status>
+                            Select a plate or no-plate fixture to start.
+                          </div>
+                          <div class="still-image-result" data-detection-result hidden>
+                            <div class="still-image-stage" data-image-stage>
+                              <img data-detection-image alt="Submitted source image">
+                              <div class="detection-boxes" data-detection-boxes></div>
+                            </div>
+                            <dl class="detection-metrics">
+                              <div class="detail-row">
+                                <dt>Detections</dt>
+                                <dd data-metric="detections">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Model checksum</dt>
+                                <dd><code class="break-code" data-metric="model_checksum">-</code></dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Compute units</dt>
+                                <dd data-metric="compute_units">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Preprocessing</dt>
+                                <dd data-metric="preprocessing_ms">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Inference</dt>
+                                <dd data-metric="inference_ms">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Postprocessing</dt>
+                                <dd data-metric="postprocessing_ms">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Total</dt>
+                                <dd data-metric="total_ms">-</dd>
+                              </div>
+                            </dl>
+                          </div>
+                        </section>
+                      {% elif model.validation_state != "runtime_valid" %}
+                        <p class="workflow-disabled">
+                          Validate the model with the selected runtime before image detection.
+                        </p>
+                      {% endif %}
                     </article>
                   {% endfor %}
                 </div>

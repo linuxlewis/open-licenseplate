@@ -157,6 +157,124 @@ a {
   background: currentColor;
 }
 
+.still-image-workflow {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 20px;
+  border: 1px solid rgba(45, 124, 118, 0.24);
+  border-radius: var(--radius-medium);
+  background:
+    linear-gradient(135deg, rgba(220, 236, 232, 0.78), rgba(255, 253, 248, 0.74)),
+    var(--paper);
+}
+
+.workflow-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workflow-heading h4 {
+  margin: 4px 0 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.workflow-badge {
+  padding: 6px 9px;
+  border: 1px solid rgba(45, 124, 118, 0.25);
+  border-radius: 999px;
+  color: var(--teal);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.still-image-form {
+  display: grid;
+  gap: 10px;
+}
+
+.still-image-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px minmax(0, 1fr) minmax(160px, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.still-image-controls .field-label {
+  margin: 0;
+}
+
+.still-image-status,
+.workflow-disabled {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.still-image-result {
+  display: grid;
+  gap: 16px;
+}
+
+.still-image-stage {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #152124;
+}
+
+.still-image-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.detection-boxes {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.detection-box {
+  position: absolute;
+  border: 2px solid #f5ca68;
+  background: rgba(245, 202, 104, 0.12);
+  box-shadow: 0 0 0 1px rgba(23, 35, 39, 0.28);
+}
+
+.detection-box span {
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  padding: 2px 5px;
+  color: #172327;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+  background: #f5ca68;
+}
+
+.detection-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 18px;
+  margin: 0;
+}
+
+.detection-metrics .detail-row {
+  border-top: 1px solid rgba(23, 35, 39, 0.1);
+}
+
+.detection-metrics dd {
+  overflow-wrap: anywhere;
+}
+
 .shell-body {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
@@ -1176,6 +1294,10 @@ code {
   .camera-layout,
   .camera-grid,
   .model-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .still-image-controls {
     grid-template-columns: 1fr;
   }
 

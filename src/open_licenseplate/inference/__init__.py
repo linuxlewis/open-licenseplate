@@ -24,7 +24,16 @@ from .contract import (
     StillImage,
 )
 from .coreml import CoreMLBackend, compare_manifest_to_inspection, coreml_compute_unit
-from .detector import BackendStillImageDetector, DetectorSession, StillImageDetector
+from .detector import BackendStillImageDetector, DetectionRun, DetectorSession, StillImageDetector
+from .image_io import (
+    MAX_STILL_IMAGE_BYTES,
+    MAX_STILL_IMAGE_DIMENSION,
+    MAX_STILL_IMAGE_PIXELS,
+    DecodedStillImage,
+    StillImageDecodeError,
+    decode_still_image,
+)
+from .registry import DetectorRegistry
 
 __all__ = [
     "BackendContractError",
@@ -39,7 +48,9 @@ __all__ = [
     "Detection",
     "DetectionAdapter",
     "DetectionBatch",
+    "DetectionRun",
     "DetectionValidationError",
+    "DetectorRegistry",
     "DetectorSession",
     "FeatureDescription",
     "ImageTransform",
@@ -50,9 +61,15 @@ __all__ = [
     "PreparedInput",
     "PreprocessingError",
     "StillImage",
+    "DecodedStillImage",
+    "StillImageDecodeError",
     "StillImageDetector",
     "UltralyticsYoloNmsAdapter",
     "adapter_for_manifest",
     "compare_manifest_to_inspection",
     "coreml_compute_unit",
+    "decode_still_image",
+    "MAX_STILL_IMAGE_BYTES",
+    "MAX_STILL_IMAGE_DIMENSION",
+    "MAX_STILL_IMAGE_PIXELS",
 ]

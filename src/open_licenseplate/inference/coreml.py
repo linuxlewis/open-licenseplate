@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import sys
 from collections.abc import Mapping
 from importlib import import_module
@@ -25,7 +26,7 @@ from .contract import (
 
 
 class CoreMLBackend:
-    """Load and predict Core ML packages only on macOS."""
+    """Load and predict Core ML packages only on Apple Silicon macOS."""
 
     name = "coreml"
 
@@ -258,13 +259,14 @@ def _coreml_input_value(prepared: PreparedInput) -> Any:
 
 
 def _require_macos() -> None:
-    if sys.platform != "darwin":
-        raise BackendUnavailableError("Core ML backend is available only on macOS")
+    if sys.platform != "darwin" or platform.machine() not in {"arm64", "aarch64"}:
+        raise BackendUnavailableError(
+            "Core ML backend is available only on macOS with Apple Silicon"
+        )
 
 
 def _import_coremltools() -> Any:
-    if sys.platform != "darwin":
-        raise BackendUnavailableError("Core ML backend is available only on macOS")
+    _require_macos()
     try:
         coremltools = import_module("coremltools")
     except ImportError as error:

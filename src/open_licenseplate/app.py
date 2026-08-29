@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -22,6 +22,7 @@ from .cameras.service import CameraConfigurationError, prepare_camera_config
 from .capture import CameraRuntime, PyAVRTSPSource, SourceFactory
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
+from .inference import CoreMLBackend, DetectorRegistry, InferenceBackend
 from .logging import configure_logging
 from .models.api import _read_import_request
 from .models.api import router as model_api_router
@@ -93,12 +94,14 @@ def create_app(
     settings: AppSettings | None = None,
     *,
     source_factory: SourceFactory | None = None,
+    inference_backend_factory: Callable[[], InferenceBackend] | None = None,
 ) -> FastAPI:
     """Create the application without starting a server."""
     effective_settings = settings or load_settings()
     paths = ManagedPaths.from_settings(effective_settings)
     effective_source_factory = source_factory or _default_source_factory
     camera_runtime = CameraRuntime(effective_source_factory)
+    backend_factory = inference_backend_factory or CoreMLBackend
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -115,6 +118,7 @@ def create_app(
         try:
             yield
         finally:
+            application.state.detector_registry.close()
             await asyncio.to_thread(camera_runtime.close)
             application.state.startup_complete = False
             logger.info("application stopped")
@@ -129,6 +133,8 @@ def create_app(
     application.state.startup_complete = False
     application.state.camera_runtime = camera_runtime
     application.state.camera_source_factory = effective_source_factory
+    application.state.inference_backend_factory = backend_factory
+    application.state.detector_registry = DetectorRegistry(backend_factory)
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)
     application.include_router(model_api_router)
@@ -291,7 +297,7 @@ def create_app(
         return _model_redirect("imported")
 
     @application.post("/models/{model_id}/validate", include_in_schema=False)
-    async def validate_model_from_page(model_id: str) -> RedirectResponse:
+    async def validate_model_from_page(model_id: str, request: Request) -> RedirectResponse:
         database = _ready_database(paths)
         if database is None:
             return _model_redirect("database")
@@ -300,7 +306,13 @@ def create_app(
             model = repository.get(model_id)
             if model is None:
                 return _model_redirect("missing")
-            result = validate_model(model=model, paths=paths, repository=repository)
+            result = await asyncio.to_thread(
+                validate_model,
+                model=model,
+                paths=paths,
+                repository=repository,
+                backend=request.app.state.inference_backend_factory(),
+            )
         except ModelImportError as error:
             return _model_redirect("error", str(error))
         finally:
