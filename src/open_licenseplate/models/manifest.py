@@ -201,8 +201,23 @@ def _validate_preprocessing(value: Any) -> None:
 
 def _validate_outputs(value: Any) -> None:
     values = _required_mapping(value, "outputs")
-    for field_name in ("boxes", "scores"):
-        _required_section_text(values, "outputs", field_name, max_length=255)
+    has_boxes = "boxes" in values
+    has_scores = "scores" in values
+    has_raw = "raw" in values
+    if has_boxes != has_scores:
+        missing = "scores" if has_boxes else "boxes"
+        raise ModelManifestError(f"manifest outputs.{missing} is required")
+    if not (has_raw or (has_boxes and has_scores)):
+        raise ModelManifestError("manifest outputs.boxes and outputs.scores are required")
+    for field_name in ("boxes", "scores", "raw", "classes"):
+        if field_name in values:
+            _required_section_text(values, "outputs", field_name, max_length=255)
+    box_format = values.get("box_format", "xyxy")
+    if not isinstance(box_format, str) or box_format not in {"xyxy", "xywh"}:
+        raise ModelManifestError("manifest outputs.box_format must be xyxy or xywh")
+    raw_has_objectness = values.get("raw_has_objectness", False)
+    if not isinstance(raw_has_objectness, bool):
+        raise ModelManifestError("manifest outputs.raw_has_objectness must be boolean")
 
 
 def _validate_labels(value: Any) -> None:

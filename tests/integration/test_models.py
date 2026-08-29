@@ -104,8 +104,12 @@ def test_model_api_imports_reads_validates_activates_and_deletes(
         validated = client.post(f"/api/v1/models/{model_id}/validate")
         assert validated.status_code == 200
         assert validated.json()["structural_valid"] is True
-        assert validated.json()["runtime_valid"] is None
-        assert validated.json()["validation_state"] == "pending_runtime_validation"
+        assert validated.json()["runtime_valid"] in {None, False}
+        if validated.json()["runtime_valid"] is None:
+            assert validated.json()["validation_state"] == "pending_runtime_validation"
+        else:
+            assert validated.json()["validation_state"] == "invalid"
+            assert validated.json()["validation_details"]["runtime_validation"] == "failed"
 
         blocked_activation = client.post(f"/api/v1/models/{model_id}/activate")
         assert blocked_activation.status_code == 409

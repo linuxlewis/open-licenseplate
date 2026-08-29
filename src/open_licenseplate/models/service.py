@@ -9,6 +9,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from ..inference import (
+    BackendOptions,
+    BackendUnavailableError,
+    CoreMLBackend,
+    ModelDescriptor,
+    StillImage,
+    adapter_for_manifest,
+    compare_manifest_to_inspection,
+)
+from ..inference.contract import InferenceBackend, InferenceError
 from ..paths import ManagedPaths
 from .archive import (
     ModelArchiveError,
@@ -140,8 +152,11 @@ def validate_model(
     model: Model,
     paths: ManagedPaths,
     repository: ModelRepository,
+    backend: InferenceBackend | None = None,
+    options: BackendOptions | None = None,
+    validation_image: StillImage | None = None,
 ) -> ModelValidation:
-    """Recheck manifest, package structure, and checksum without loading the model."""
+    """Recheck structure, inspect the backend contract, and run one prediction."""
     details: dict[str, Any] = {
         "runtime_validation": "not_run",
         "structural_validation": "not_run",
@@ -183,19 +198,110 @@ def validate_model(
             details=details,
         )
 
+    descriptor = ModelDescriptor(
+        model_id=model.id,
+        artifact_path=str(artifact_path),
+        artifact_sha256=model.artifact_sha256,
+        manifest=manifest,
+    )
+    runtime_backend = backend or CoreMLBackend()
+    runtime_options = options or BackendOptions()
+    loaded = None
+    try:
+        loaded = runtime_backend.load(descriptor, runtime_options)
+        details["inspection"] = loaded.inspection.as_dict()
+        compare_manifest_to_inspection(manifest, loaded.inspection)
+        adapter = adapter_for_manifest(manifest)
+        prepared = adapter.preprocess(
+            validation_image or _validation_image(manifest),
+            manifest,
+        )
+        output = runtime_backend.predict(loaded, prepared)
+        decoded = adapter.decode(output, prepared.transform)
+    except BackendUnavailableError as error:
+        details.update(
+            {
+                "runtime_validation": "unavailable",
+                "runtime_validation_reason": str(error),
+                "compute_units": runtime_options.compute_units.value,
+            }
+        )
+        if loaded is not None:
+            details["inspection"] = loaded.inspection.as_dict()
+        stored = repository.update_validation(
+            model.id,
+            state=PENDING_RUNTIME_VALIDATION,
+            details=details,
+        )
+        if stored is None:
+            raise ModelImportError("model was removed during validation") from error
+        return ModelValidation(
+            structural_valid=True,
+            runtime_valid=None,
+            state=stored.validation_state,
+            details=details,
+        )
+    except (InferenceError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        details.update(
+            {
+                "runtime_validation": "failed",
+                "runtime_validation_reason": str(error),
+                "compute_units": runtime_options.compute_units.value,
+            }
+        )
+        if loaded is not None:
+            details["inspection"] = loaded.inspection.as_dict()
+        stored = repository.update_validation(model.id, state="invalid", details=details)
+        if stored is None:
+            raise ModelImportError("model was removed during validation") from error
+        return ModelValidation(
+            structural_valid=True,
+            runtime_valid=False,
+            state=stored.validation_state,
+            details=details,
+        )
+    finally:
+        if loaded is not None:
+            runtime_backend.close(loaded)
+
+    details.update(
+        {
+            "runtime_validation": "passed",
+            "compute_units": runtime_options.compute_units.value,
+            "prediction": {
+                "status": "passed",
+                "detections": len(decoded.detections),
+                "rejected_candidates": decoded.rejected_count,
+                "transform": prepared.transform.as_dict(),
+            },
+        }
+    )
     stored = repository.update_validation(
         model.id,
-        state=PENDING_RUNTIME_VALIDATION,
+        state=RUNTIME_VALID,
         details=details,
     )
     if stored is None:
         raise ModelImportError("model was removed during validation")
     return ModelValidation(
         structural_valid=True,
-        runtime_valid=None,
+        runtime_valid=True,
         state=stored.validation_state,
         details=details,
     )
+
+
+def _validation_image(manifest: Any) -> StillImage:
+    """Create a deterministic image without downloading or reading model files."""
+    input_values = manifest.raw["input"]
+    width = int(input_values["width"])
+    height = int(input_values["height"])
+    color_space = str(input_values["color_space"]).casefold()
+    if color_space == "grayscale":
+        pixels = np.zeros((height, width), dtype=np.uint8)
+    else:
+        pixels = np.zeros((height, width, 3), dtype=np.uint8)
+    return StillImage(pixels=pixels, color_space=color_space)
 
 
 def delete_model(

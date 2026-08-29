@@ -142,3 +142,29 @@ def test_manifest_rejects_invalid_nested_values() -> None:
 def test_manifest_rejects_non_object_input() -> None:
     with pytest.raises(ModelManifestError, match="input"):
         parse_manifest(_manifest(input=["not", "an", "object"]))
+
+
+def test_manifest_accepts_declared_raw_output_contract() -> None:
+    manifest = parse_manifest(
+        _manifest(
+            outputs={
+                "raw": "predictions",
+                "box_format": "xywh",
+                "raw_has_objectness": False,
+            }
+        )
+    )
+
+    assert manifest.raw["outputs"]["raw"] == "predictions"
+
+
+def test_manifest_rejects_non_boolean_raw_objectness() -> None:
+    with pytest.raises(ModelManifestError, match="raw_has_objectness"):
+        parse_manifest(
+            _manifest(
+                outputs={
+                    "raw": "predictions",
+                    "raw_has_objectness": "false",
+                }
+            )
+        )

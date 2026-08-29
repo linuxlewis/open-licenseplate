@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "pydantic-settings>=2.6,<3",
     "python-multipart>=0.0.20,<1",
+    "Pillow>=11,<13",
     "sqlalchemy>=2.0,<3",
     "uvicorn>=0.32,<1",
     "PyYAML>=6.0,<7",
@@ -37,6 +38,11 @@ dev = [
     "types-PyYAML>=6.0.12,<7",
 ]
 
+[project.optional-dependencies]
+coreml = [
+    "coremltools>=8,<9; sys_platform == 'darwin'",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/open_licenseplate"]
 
@@ -46,6 +52,7 @@ testpaths = ["tests"]
 markers = [
     "browser: tests that exercise the shell in a real browser",
     "integration: tests that exercise application boundaries",
+    "macos: tests that require macOS or Apple Silicon runtime support",
     "m0_acceptance: the complete M0 operator workflow",
 ]
 

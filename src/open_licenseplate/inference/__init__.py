@@ -1,0 +1,58 @@
+"""Stable still-image inference contracts and backend implementations."""
+
+from .adapters import UltralyticsYoloNmsAdapter, adapter_for_manifest
+from .contract import (
+    BackendContractError,
+    BackendInspection,
+    BackendOptions,
+    BackendOutput,
+    BackendUnavailableError,
+    ComputeUnit,
+    ComputeUnits,
+    Detection,
+    DetectionAdapter,
+    DetectionBatch,
+    DetectionValidationError,
+    FeatureDescription,
+    ImageTransform,
+    InferenceBackend,
+    InferenceError,
+    LoadedModel,
+    ModelDescriptor,
+    PreparedInput,
+    PreprocessingError,
+    StillImage,
+)
+from .coreml import CoreMLBackend, compare_manifest_to_inspection, coreml_compute_unit
+from .detector import BackendStillImageDetector, DetectorSession, StillImageDetector
+
+__all__ = [
+    "BackendContractError",
+    "BackendInspection",
+    "BackendOptions",
+    "BackendOutput",
+    "BackendStillImageDetector",
+    "BackendUnavailableError",
+    "ComputeUnit",
+    "ComputeUnits",
+    "CoreMLBackend",
+    "Detection",
+    "DetectionAdapter",
+    "DetectionBatch",
+    "DetectionValidationError",
+    "DetectorSession",
+    "FeatureDescription",
+    "ImageTransform",
+    "InferenceBackend",
+    "InferenceError",
+    "LoadedModel",
+    "ModelDescriptor",
+    "PreparedInput",
+    "PreprocessingError",
+    "StillImage",
+    "StillImageDetector",
+    "UltralyticsYoloNmsAdapter",
+    "adapter_for_manifest",
+    "compare_manifest_to_inspection",
+    "coreml_compute_unit",
+]
