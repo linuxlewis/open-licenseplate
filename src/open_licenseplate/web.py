@@ -106,11 +106,11 @@ PAGES = (
         path="/models",
         eyebrow="Inference",
         title="Detection models",
-        description="Manage validated detector packages, adapters, and provenance.",
+        description="Manage imported detector packages, adapters, and provenance.",
         empty_title="No models imported",
         empty_description=(
-            "Model import and validation will appear when the Core ML slice is implemented. "
-            "No model is loaded by this shell."
+            "Import a model package to inspect its manifest and provenance. "
+            "This slice does not load or execute a model."
         ),
         planned_milestone="M2 and M7",
     ),

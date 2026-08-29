@@ -494,10 +494,14 @@
                           <form method="post" action="/models/{{ model.id }}/deactivate">
                             <button class="quiet-button" type="submit">Deactivate</button>
                           </form>
-                        {% else %}
+                        {% elif model.validation_state == "runtime_valid" %}
                           <form method="post" action="/models/{{ model.id }}/activate">
                             <button class="save-button" type="submit">Activate</button>
                           </form>
+                        {% else %}
+                          <button class="quiet-button" type="button" disabled>
+                            Activation pending P08
+                          </button>
                         {% endif %}
                         <form method="post" action="/models/{{ model.id }}/delete">
                           <button class="quiet-button" type="submit">Delete</button>

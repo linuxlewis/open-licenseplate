@@ -99,10 +99,12 @@ registry row. A failed import removes staging and any final package created
 by that import.
 
 The manifest is stored as an immutable JSON snapshot. The registry records the
-manifest ID, backend, adapter, source, license, checksum, package validation
-state, and active state. Activation only selects a package for a later runtime
-slice. This PR never executes imported files, loads Core ML, or runs
-prediction.
+manifest ID, backend, adapter, source, license, checksum, structural validation
+state, and active state. Imported packages use the
+`pending_runtime_validation` state. Package checks do not make a model
+runtime-valid, so activation remains blocked until a later runtime slice
+records `runtime_valid`. This PR never executes imported files, loads Core ML,
+or runs prediction.
 
 The browser workflow is available at `/models`. The JSON registry API uses
 `/api/v1/models` with import, read, package validation, activation,

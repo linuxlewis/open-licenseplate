@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,11 +30,20 @@ class ModelConflictError(ModelImportError):
     """Raised when an import would replace an existing managed model."""
 
 
+class ModelDeletionError(ModelImportError):
+    """Raised when a model deletion cannot finish or restore its prior state."""
+
+
+PENDING_RUNTIME_VALIDATION = "pending_runtime_validation"
+RUNTIME_VALID = "runtime_valid"
+
+
 @dataclass(frozen=True)
 class ModelValidation:
     """Package validation result safe to return to an operator."""
 
-    valid: bool
+    structural_valid: bool
+    runtime_valid: bool | None
     state: str
     details: dict[str, Any]
 
@@ -91,6 +99,7 @@ def import_model(
             "archive": "valid",
             "artifact_sha256": checksum,
             "runtime_validation": "not_run",
+            "structural_validation": "passed",
         }
         try:
             stage_package.chmod(0o700)
@@ -108,7 +117,7 @@ def import_model(
                 artifact_path=model_directory.relative_to(paths.models)
                 .joinpath(manifest.artifact)
                 .as_posix(),
-                validation_state="valid",
+                validation_state=PENDING_RUNTIME_VALIDATION,
                 validation_details=details,
             )
         )
@@ -135,6 +144,7 @@ def validate_model(
     """Recheck manifest, package structure, and checksum without loading the model."""
     details: dict[str, Any] = {
         "runtime_validation": "not_run",
+        "structural_validation": "not_run",
     }
     try:
         manifest = manifest_from_record(model)
@@ -155,21 +165,37 @@ def validate_model(
                 "manifest": "valid",
                 "archive": "valid",
                 "artifact_sha256": checksum,
+                "structural_validation": "passed",
             }
         )
         if checksum != manifest.artifact_sha256 or checksum != model.artifact_sha256:
             raise ModelImportError("managed model artifact SHA-256 does not match provenance")
     except (ModelImportError, ModelManifestError, ValueError, OSError) as error:
         details["error"] = str(error)
+        details["structural_validation"] = "failed"
         stored = repository.update_validation(model.id, state="invalid", details=details)
         if stored is None:
             raise ModelImportError("model was removed during validation") from error
-        return ModelValidation(valid=False, state=stored.validation_state, details=details)
+        return ModelValidation(
+            structural_valid=False,
+            runtime_valid=None,
+            state=stored.validation_state,
+            details=details,
+        )
 
-    stored = repository.update_validation(model.id, state="valid", details=details)
+    stored = repository.update_validation(
+        model.id,
+        state=PENDING_RUNTIME_VALIDATION,
+        details=details,
+    )
     if stored is None:
         raise ModelImportError("model was removed during validation")
-    return ModelValidation(valid=True, state=stored.validation_state, details=details)
+    return ModelValidation(
+        structural_valid=True,
+        runtime_valid=None,
+        state=stored.validation_state,
+        details=details,
+    )
 
 
 def delete_model(
@@ -178,7 +204,7 @@ def delete_model(
     paths: ManagedPaths,
     repository: ModelRepository,
 ) -> None:
-    """Delete one inactive managed model and its validated artifact directory."""
+    """Delete one inactive model with quarantine and rollback protection."""
     if model.active:
         raise ModelImportError("active models cannot be deleted")
     artifact_path = ManagedPaths.validate_contained_path(
@@ -192,14 +218,95 @@ def delete_model(
     ):
         raise ModelImportError("managed model artifact path is invalid")
 
-    deleted = repository.delete(model.id)
-    if deleted is None:
-        raise ModelImportError("model was not found")
-    if artifact_path.exists():
-        _remove_path(artifact_path)
-    if artifact_path.parent != paths.models and artifact_path.parent.is_dir():
-        with suppress(OSError):
-            artifact_path.parent.rmdir()
+    model_directory = artifact_path.parent
+    if model_directory.parent != paths.models or model_directory.name != model.id:
+        raise ModelImportError("managed model artifact path is invalid")
+    if artifact_path.exists() and {child.name for child in model_directory.iterdir()} != {
+        artifact_path.name
+    }:
+        raise ModelImportError("managed model directory contains unexpected files")
+
+    paths.ensure_directories()
+    quarantine_root = Path(tempfile.mkdtemp(prefix="delete-", dir=paths.staging))
+    quarantine_directory = quarantine_root / model_directory.name
+    moved = False
+    deleted: Model | None = None
+    try:
+        try:
+            os.replace(model_directory, quarantine_directory)
+            moved = True
+        except OSError as error:
+            raise ModelDeletionError("model artifact could not be quarantined") from error
+
+        try:
+            deleted = repository.delete(model.id)
+        except Exception as error:
+            _restore_deleted_model(
+                model=model,
+                repository=repository,
+                model_directory=model_directory,
+                quarantine_directory=quarantine_directory,
+                quarantine_root=quarantine_root,
+            )
+            raise ModelDeletionError(
+                "model registry deletion failed; model was restored"
+            ) from error
+        if deleted is None:
+            _restore_deleted_model(
+                model=model,
+                repository=repository,
+                model_directory=model_directory,
+                quarantine_directory=quarantine_directory,
+                quarantine_root=quarantine_root,
+            )
+            raise ModelDeletionError("model was not found; model was restored")
+
+        try:
+            _remove_path(quarantine_root)
+        except OSError as error:
+            try:
+                os.replace(quarantine_directory, model_directory)
+                repository.restore(deleted)
+                _remove_path(quarantine_root)
+            except Exception as restore_error:
+                raise ModelDeletionError(
+                    "model deletion cleanup failed and model restoration failed"
+                ) from restore_error
+            raise ModelDeletionError("model deletion cleanup failed; model was restored") from error
+    finally:
+        if not moved:
+            _remove_path(quarantine_root)
+
+
+def _restore_deleted_model(
+    *,
+    model: Model,
+    repository: ModelRepository,
+    model_directory: Path,
+    quarantine_directory: Path,
+    quarantine_root: Path,
+) -> None:
+    """Restore both sides of a deletion before returning an error."""
+    restore_errors: list[Exception] = []
+    try:
+        if quarantine_directory.exists():
+            os.replace(quarantine_directory, model_directory)
+    except Exception as error:
+        restore_errors.append(error)
+    try:
+        repository.restore(model)
+    except Exception as error:
+        restore_errors.append(error)
+    if not restore_errors:
+        try:
+            if quarantine_root.exists():
+                _remove_path(quarantine_root)
+        except Exception as error:
+            restore_errors.append(error)
+    if restore_errors:
+        raise ModelDeletionError("model deletion failed and model restoration failed") from (
+            restore_errors[0]
+        )
 
 
 def _remove_path(path: Path) -> None:
@@ -221,4 +328,4 @@ def _remove_path(path: Path) -> None:
                 else:
                     candidate.chmod(0o700)
         path.chmod(0o700)
-        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(path)

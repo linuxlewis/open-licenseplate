@@ -196,13 +196,8 @@ def test_browser_can_import_and_manage_a_model_package(
     page.wait_for_url(f"{browser_base_url}/models?notice=imported")
 
     assert page.get_by_role("heading", name="Test model", exact=True).is_visible()
+    assert page.get_by_role("button", name="Activation pending P08", exact=True).is_visible()
     assert "Runtime validation was not run" in page.content()
-    page.get_by_role("button", name="Activate", exact=True).click()
-    page.wait_for_url(f"{browser_base_url}/models?notice=activated")
-    assert page.get_by_role("button", name="Deactivate", exact=True).is_visible()
-
-    page.get_by_role("button", name="Deactivate", exact=True).click()
-    page.wait_for_url(f"{browser_base_url}/models?notice=deactivated")
     page.get_by_role("button", name="Delete", exact=True).click()
     page.wait_for_url(f"{browser_base_url}/models?notice=deleted")
     assert page.get_by_text("No managed model packages yet.").is_visible()

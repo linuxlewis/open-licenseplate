@@ -132,9 +132,41 @@ class ModelRepository:
             session.expunge(model)
             return model
 
+    def restore(self, model: Model) -> Model:
+        """Restore a model row after a failed filesystem deletion."""
+        with self.database.session() as session:
+            existing = session.get(Model, model.id)
+            if existing is not None:
+                return existing
+            restored = Model(
+                id=model.id,
+                display_name=model.display_name,
+                backend=model.backend,
+                adapter=model.adapter,
+                artifact_path=model.artifact_path,
+                artifact_sha256=model.artifact_sha256,
+                manifest_json=model.manifest_json,
+                validation_state=model.validation_state,
+                validation_details_json=model.validation_details_json,
+                source_url=model.source_url,
+                source_license=model.source_license,
+                active=model.active,
+                created_at=model.created_at,
+                last_validated_at=model.last_validated_at,
+            )
+            session.add(restored)
+            session.flush()
+            session.expunge(restored)
+            return restored
+
 
 def model_payload(model: Model, *, artifact_exists: bool = True) -> dict[str, Any]:
     """Return a JSON-safe public model representation."""
+    manifest = _load_json_object(model.manifest_json, "model manifest")
+    validation_details = _load_json_object(
+        model.validation_details_json,
+        "model validation details",
+    )
     return {
         "id": model.id,
         "display_name": model.display_name,
@@ -142,12 +174,11 @@ def model_payload(model: Model, *, artifact_exists: bool = True) -> dict[str, An
         "adapter": model.adapter,
         "artifact_path": model.artifact_path,
         "artifact_sha256": model.artifact_sha256,
-        "manifest": _load_json_object(model.manifest_json, "model manifest"),
+        "manifest": manifest,
         "validation_state": model.validation_state,
-        "validation_details": _load_json_object(
-            model.validation_details_json,
-            "model validation details",
-        ),
+        "validation_details": validation_details,
+        "structural_valid": validation_details.get("structural_validation") == "passed",
+        "runtime_valid": model.validation_state == "runtime_valid",
         "source": {
             "url": model.source_url,
             "license": model.source_license,

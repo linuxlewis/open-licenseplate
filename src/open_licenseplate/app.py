@@ -27,6 +27,7 @@ from .models.api import _read_import_request
 from .models.api import router as model_api_router
 from .models.repository import ModelRepository
 from .models.service import (
+    RUNTIME_VALID,
     ModelConflictError,
     ModelImportError,
     delete_model,
@@ -304,7 +305,7 @@ def create_app(
             return _model_redirect("error", str(error))
         finally:
             database.dispose()
-        return _model_redirect("validated" if result.valid else "invalid")
+        return _model_redirect("validated" if result.structural_valid else "invalid")
 
     @application.post("/models/{model_id}/activate", include_in_schema=False)
     async def activate_model_from_page(model_id: str) -> RedirectResponse:
@@ -443,8 +444,11 @@ def _model_state_from_page(
         model = repository.get(model_id)
         if model is None:
             return _model_redirect("missing")
-        if active and model.validation_state != "valid":
-            return _model_redirect("error", "only valid models can be activated")
+        if active and model.validation_state != RUNTIME_VALID:
+            return _model_redirect(
+                "error",
+                "runtime model validation is required before activation",
+            )
         if active:
             artifact_path = ManagedPaths.validate_contained_path(
                 paths.models / model.artifact_path,

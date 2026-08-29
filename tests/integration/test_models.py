@@ -12,8 +12,14 @@ from model_helpers import create_model_fixture
 from open_licenseplate.app import create_app
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import Database, upgrade_database
+from open_licenseplate.models import service as model_service
 from open_licenseplate.models.repository import ModelRepository
-from open_licenseplate.models.service import import_model
+from open_licenseplate.models.service import (
+    RUNTIME_VALID,
+    ModelDeletionError,
+    delete_model,
+    import_model,
+)
 from open_licenseplate.paths import ManagedPaths
 
 
@@ -81,8 +87,11 @@ def test_model_api_imports_reads_validates_activates_and_deletes(
         model_id = model["id"]
         artifact_path = settings.storage.data_dir / "models" / "test-model" / "model.mlpackage"
 
-        assert model["validation_state"] == "valid"
+        assert model["validation_state"] == "pending_runtime_validation"
         assert model["validation_details"]["runtime_validation"] == "not_run"
+        assert model["validation_details"]["structural_validation"] == "passed"
+        assert model["structural_valid"] is True
+        assert model["runtime_valid"] is False
         assert model["artifact_exists"] is True
         assert artifact_path.is_dir()
         assert stat.S_IMODE((artifact_path / "Manifest.json").stat().st_mode) == 0o400
@@ -94,7 +103,27 @@ def test_model_api_imports_reads_validates_activates_and_deletes(
 
         validated = client.post(f"/api/v1/models/{model_id}/validate")
         assert validated.status_code == 200
-        assert validated.json()["valid"] is True
+        assert validated.json()["structural_valid"] is True
+        assert validated.json()["runtime_valid"] is None
+        assert validated.json()["validation_state"] == "pending_runtime_validation"
+
+        blocked_activation = client.post(f"/api/v1/models/{model_id}/activate")
+        assert blocked_activation.status_code == 409
+        assert "runtime model validation is required" in blocked_activation.text
+
+        database = Database(database_path)
+        try:
+            repository = ModelRepository(database)
+            repository.update_validation(
+                model_id,
+                state=RUNTIME_VALID,
+                details={
+                    "structural_validation": "passed",
+                    "runtime_validation": "passed",
+                },
+            )
+        finally:
+            database.dispose()
 
         activated = client.post(f"/api/v1/models/{model_id}/activate")
         assert activated.status_code == 200
@@ -193,3 +222,91 @@ def test_repository_failure_removes_final_package_and_staging(
 
     assert not (paths.models / "db-failure" / "model.mlpackage").exists()
     assert list(paths.staging.iterdir()) == []
+
+
+def test_delete_restores_registry_and_package_when_database_delete_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    database_path = settings.storage.data_dir / "open-licenseplate.sqlite3"
+    upgrade_database(database_path)
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id="delete-db-failure",
+    )
+
+    database = Database(database_path)
+    try:
+        repository = ModelRepository(database)
+        model = import_model(
+            manifest_value=manifest_path.read_bytes(),
+            source_path=archive_path,
+            paths=ManagedPaths.from_settings(settings),
+            repository=repository,
+        )
+        artifact_path = settings.storage.data_dir / "models" / model.id / "model.mlpackage"
+
+        original_delete = repository.delete
+
+        def fail_delete(model_id: str) -> None:
+            original_delete(model_id)
+            raise RuntimeError("simulated database delete failure")
+
+        monkeypatch.setattr(repository, "delete", fail_delete)
+        with pytest.raises(ModelDeletionError, match="registry deletion failed"):
+            delete_model(
+                model=model,
+                paths=ManagedPaths.from_settings(settings),
+                repository=repository,
+            )
+
+        assert repository.get(model.id) is not None
+        assert artifact_path.is_dir()
+        assert list((settings.storage.data_dir / "staging").iterdir()) == []
+    finally:
+        database.dispose()
+
+
+def test_delete_restores_registry_and_package_when_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    database_path = settings.storage.data_dir / "open-licenseplate.sqlite3"
+    upgrade_database(database_path)
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id="delete-cleanup-failure",
+    )
+
+    database = Database(database_path)
+    try:
+        repository = ModelRepository(database)
+        model = import_model(
+            manifest_value=manifest_path.read_bytes(),
+            source_path=archive_path,
+            paths=ManagedPaths.from_settings(settings),
+            repository=repository,
+        )
+        paths = ManagedPaths.from_settings(settings)
+        artifact_path = paths.models / model.id / "model.mlpackage"
+        original_remove_path = model_service._remove_path
+        failed = False
+
+        def fail_once(path: Path) -> None:
+            nonlocal failed
+            if path.parent == paths.staging and not failed:
+                failed = True
+                raise OSError("simulated cleanup failure")
+            original_remove_path(path)
+
+        monkeypatch.setattr(model_service, "_remove_path", fail_once)
+        with pytest.raises(ModelDeletionError, match="cleanup failed"):
+            delete_model(model=model, paths=paths, repository=repository)
+
+        assert repository.get(model.id) is not None
+        assert artifact_path.is_dir()
+        assert list(paths.staging.iterdir()) == []
+    finally:
+        database.dispose()

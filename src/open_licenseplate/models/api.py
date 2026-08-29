@@ -18,7 +18,9 @@ from ..redaction import redact_text
 from .archive import MAX_ARCHIVE_BYTES
 from .repository import ModelRepository, model_payload
 from .service import (
+    RUNTIME_VALID,
     ModelConflictError,
+    ModelDeletionError,
     ModelImportError,
     delete_model,
     import_model,
@@ -121,7 +123,8 @@ async def validate_model_api(model_id: str, request: Request) -> JSONResponse:
                     refreshed,
                     artifact_exists=_artifact_exists(request.app.state.paths, refreshed),
                 ),
-                "valid": result.valid,
+                "structural_valid": result.structural_valid,
+                "runtime_valid": result.runtime_valid,
                 "validation_state": result.state,
                 "validation_details": result.details,
             }
@@ -159,6 +162,8 @@ async def remove_model(model_id: str, request: Request) -> JSONResponse:
             return _error("model was not found", status_code=404)
         delete_model(model=model, paths=request.app.state.paths, repository=repository)
         return _json({"deleted": True, "model_id": model_id})
+    except ModelDeletionError as exception:
+        return _error(str(exception), status_code=500)
     except ModelImportError as exception:
         status_code = 409 if "active" in str(exception) else 422
         return _error(str(exception), status_code=status_code)
@@ -182,8 +187,11 @@ async def _set_model_active(
         if model is None:
             return _error("model was not found", status_code=404)
         if active:
-            if model.validation_state != "valid":
-                return _error("only valid models can be activated", status_code=409)
+            if model.validation_state != RUNTIME_VALID:
+                return _error(
+                    "runtime model validation is required before activation",
+                    status_code=409,
+                )
             if not _artifact_exists(request.app.state.paths, model):
                 return _error("model artifact is missing", status_code=409)
         updated = repository.set_active(model_id, active)
