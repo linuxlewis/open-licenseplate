@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -43,15 +44,68 @@ def test_manifest_accepts_json_and_yaml() -> None:
 schema_version: 1
 id: test-model
 display_name: Test model
+task: object_detection
 backend: coreml
 adapter: ultralytics_yolo_nms
 artifact: model.mlpackage
 artifact_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+input:
+  name: image
+  kind: image
+  width: 640
+  height: 640
+  color_space: rgb
+preprocessing:
+  resize: letterbox
+outputs:
+  boxes: coordinates
+  scores: confidence
+labels:
+  - license_plate
+defaults:
+  confidence_threshold: 0.35
+  iou_threshold: 0.45
 """
     )
 
     assert manifest.model_id == "test-model"
     assert yaml_manifest.backend == "coreml"
+    assert yaml_manifest.raw["input"]["width"] == 640
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["task", "input", "preprocessing", "outputs", "labels", "defaults"],
+)
+def test_manifest_requires_contract_sections(field: str) -> None:
+    manifest = _manifest()
+    del manifest[field]
+
+    with pytest.raises(ModelManifestError, match=field):
+        parse_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("input", "name"),
+        ("input", "kind"),
+        ("input", "width"),
+        ("input", "height"),
+        ("input", "color_space"),
+        ("preprocessing", "resize"),
+        ("outputs", "boxes"),
+        ("outputs", "scores"),
+        ("defaults", "confidence_threshold"),
+        ("defaults", "iou_threshold"),
+    ],
+)
+def test_manifest_requires_contract_subfields(section: str, field: str) -> None:
+    manifest = copy.deepcopy(_manifest())
+    del manifest[section][field]  # type: ignore[index]
+
+    with pytest.raises(ModelManifestError, match=f"{section}\\.{field}"):
+        parse_manifest(manifest)
 
 
 @pytest.mark.parametrize(

@@ -98,7 +98,7 @@ def parse_manifest(value: bytes | str | Mapping[str, Any]) -> ModelManifest:
     if SHA256_RE.fullmatch(artifact_sha256) is None:
         raise ModelManifestError("manifest artifact_sha256 must be a 64-character SHA-256 value")
 
-    task = raw.get("task", "object_detection")
+    task = _required_text(raw, "task", max_length=64)
     if task != "object_detection":
         raise ModelManifestError("manifest task must be object_detection")
 
@@ -145,6 +145,22 @@ def _required_text(values: Mapping[str, Any], field_name: str, *, max_length: in
     return normalized
 
 
+def _required_section_text(
+    values: Mapping[str, Any],
+    section_name: str,
+    field_name: str,
+    *,
+    max_length: int,
+) -> str:
+    value = values.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ModelManifestError(f"manifest {section_name}.{field_name} is required")
+    normalized = value.strip()
+    if len(normalized) > max_length:
+        raise ModelManifestError(f"manifest {section_name}.{field_name} is too long")
+    return normalized
+
+
 def _optional_mapping(value: Any, field_name: str) -> Mapping[str, Any] | None:
     if value is None:
         return None
@@ -153,45 +169,45 @@ def _optional_mapping(value: Any, field_name: str) -> Mapping[str, Any] | None:
     return value
 
 
-def _validate_input(value: Any) -> None:
-    values = _optional_mapping(value, "input")
+def _required_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
+    values = _optional_mapping(value, field_name)
     if values is None:
-        return
-    if "name" in values and (not isinstance(values["name"], str) or not values["name"].strip()):
-        raise ModelManifestError("manifest input.name must be non-empty text")
-    if "kind" in values and values["kind"] != "image":
+        raise ModelManifestError(f"manifest {field_name} is required")
+    return values
+
+
+def _validate_input(value: Any) -> None:
+    values = _required_mapping(value, "input")
+    _required_section_text(values, "input", "name", max_length=255)
+    if _required_section_text(values, "input", "kind", max_length=32) != "image":
         raise ModelManifestError("manifest input.kind must be image")
     for field_name in ("width", "height"):
-        if field_name in values:
-            number = values[field_name]
-            if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 8192:
-                raise ModelManifestError(f"manifest input.{field_name} must be from 1 through 8192")
-    if "color_space" in values and values["color_space"] not in {"rgb", "bgr", "grayscale"}:
+        if field_name not in values:
+            raise ModelManifestError(f"manifest input.{field_name} is required")
+        number = values[field_name]
+        if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 8192:
+            raise ModelManifestError(f"manifest input.{field_name} must be from 1 through 8192")
+    color_space = _required_section_text(values, "input", "color_space", max_length=32)
+    if color_space not in {"rgb", "bgr", "grayscale"}:
         raise ModelManifestError("manifest input.color_space is not supported")
 
 
 def _validate_preprocessing(value: Any) -> None:
-    values = _optional_mapping(value, "preprocessing")
-    if values is None:
-        return
-    if "resize" in values and values["resize"] not in {"letterbox", "stretch", "none"}:
+    values = _required_mapping(value, "preprocessing")
+    resize = _required_section_text(values, "preprocessing", "resize", max_length=32)
+    if resize not in {"letterbox", "stretch", "none"}:
         raise ModelManifestError("manifest preprocessing.resize is not supported")
 
 
 def _validate_outputs(value: Any) -> None:
-    values = _optional_mapping(value, "outputs")
-    if values is None:
-        return
+    values = _required_mapping(value, "outputs")
     for field_name in ("boxes", "scores"):
-        if field_name in values and (
-            not isinstance(values[field_name], str) or not values[field_name].strip()
-        ):
-            raise ModelManifestError(f"manifest outputs.{field_name} must be non-empty text")
+        _required_section_text(values, "outputs", field_name, max_length=255)
 
 
 def _validate_labels(value: Any) -> None:
     if value is None:
-        return
+        raise ModelManifestError("manifest labels is required")
     if not isinstance(value, list) or not value:
         raise ModelManifestError("manifest labels must be a non-empty list")
     labels: set[str] = set()
@@ -205,16 +221,15 @@ def _validate_labels(value: Any) -> None:
 
 
 def _validate_defaults(value: Any) -> None:
-    values = _optional_mapping(value, "defaults")
-    if values is None:
-        return
+    values = _required_mapping(value, "defaults")
     for field_name in ("confidence_threshold", "iou_threshold"):
-        if field_name in values:
-            number = values[field_name]
-            if isinstance(number, bool) or not isinstance(number, (int, float)):
-                raise ModelManifestError(f"manifest defaults.{field_name} must be a number")
-            if not 0 <= float(number) <= 1:
-                raise ModelManifestError(f"manifest defaults.{field_name} must be between 0 and 1")
+        if field_name not in values:
+            raise ModelManifestError(f"manifest defaults.{field_name} is required")
+        number = values[field_name]
+        if isinstance(number, bool) or not isinstance(number, (int, float)):
+            raise ModelManifestError(f"manifest defaults.{field_name} must be a number")
+        if not 0 <= float(number) <= 1:
+            raise ModelManifestError(f"manifest defaults.{field_name} must be between 0 and 1")
 
 
 def _validate_compatibility(value: Any) -> None:
