@@ -15,12 +15,13 @@ uv run open-licenseplate serve
 
 The server binds to `127.0.0.1` by default. Open `http://127.0.0.1:8421/` in a
 browser. The M0 slice provides startup, health checks, managed paths,
-diagnostics, SQLite persistence, the first migration, and a Jinja/HTMX shell.
+diagnostics, SQLite persistence, migrations, and a Jinja/HTMX shell.
 The shell includes Live, Events, Jobs, Cameras, Models, and System pages. The
-future product pages use clear empty states until their milestone is complete.
+Cameras page provides M1-A camera configuration and safe configuration tests.
+The future product pages use clear empty states until their milestone is complete.
 The System page can save a comfortable or compact display density in the local
-settings table. Camera, model, tracking, and processing features arrive in
-later milestones.
+settings table. Camera streaming, preview, model, tracking, and processing
+features arrive in later milestones.
 
 `db upgrade` creates or upgrades the managed SQLite database. The database uses
 WAL mode, full synchronous writes, foreign keys, and a 5-second busy timeout.
@@ -34,6 +35,35 @@ uv run open-licenseplate settings set server.port 9000
 Configuration precedence is CLI, environment, persisted setting, then built-in
 default. Database settings contain only non-secret application values. Camera
 credentials and other secrets are not supported by this generic settings store.
+
+### Camera configuration
+
+Save a camera with an endpoint and an external credential reference. Supported
+reference formats are:
+
+```text
+env:CAMERA_RTSP_URL
+keychain:service/account
+```
+
+For an environment reference, the variable can contain the complete RTSP URL,
+including credentials. The application stores only the reference and a
+redacted endpoint description in SQLite. It does not return the resolved value
+to the API or browser. The camera test validates the endpoint and credential
+availability; it does not open a network stream until the later FrameSource
+slice is implemented.
+
+The same controls are available on the Cameras page at `/cameras`, and the
+JSON API uses `/api/v1/cameras`.
+
+Audit managed files for unredacted secret patterns with:
+
+```bash
+uv run open-licenseplate doctor --audit-secrets
+```
+
+The audit reports file names and safe status only. It does not print file
+contents or resolved credential values.
 
 ### Empty development fixture
 

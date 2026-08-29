@@ -9,10 +9,30 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _REDACTED = "[REDACTED]"
 _URL_PATTERN = re.compile(r"(?P<url>rtsps?://[^\s\"'<>]+)", re.IGNORECASE)
-_KEY_VALUE_PATTERN = re.compile(
+_QUOTED_KEY_VALUE_PATTERN = re.compile(
+    r"(?P<key_quote>[\"']?)"
     r"(?P<key>\b(?:authorization|credential|password|passwd|secret|token|api[_-]?key)\b)"
+    r"(?P=key_quote)"
     r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<quote>[\"']?)(?P<value>[^\s,;}\]\"']+)",
+    r"(?P<value_quote>[\"'])"
+    r"(?P<value>.*?)"
+    r"(?P=value_quote)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_PATTERN = re.compile(
+    r"(?P<key_quote>[\"']?)"
+    r"(?P<key>authorization)"
+    r"(?P=key_quote)"
+    r"(?P<separator>\s*[:=]\s*)"
+    r"(?P<value>(?![\"'])(?:(?:bearer|basic)\s+)?[^\r\n,;&?}\]\"']+)",
+    re.IGNORECASE,
+)
+_UNQUOTED_KEY_VALUE_PATTERN = re.compile(
+    r"(?P<key_quote>[\"']?)"
+    r"(?P<key>\b(?:authorization|credential|password|passwd|secret|token|api[_-]?key)\b)"
+    r"(?P=key_quote)"
+    r"(?P<separator>\s*[:=]\s*)"
+    r"(?P<value>(?![\"']|\[REDACTED\])(?:\[[^\]\r\n]*\]|[^\s,;&?}\]\"']+))",
     re.IGNORECASE,
 )
 _SECRET_KEY_PARTS = (
@@ -51,7 +71,8 @@ def redact_url(value: str) -> str:
     for key, query_value in parse_qsl(parsed.query, keep_blank_values=True):
         query_parts.append((key, _REDACTED if _is_secret_key(key) else query_value))
 
-    return urlunsplit((parsed.scheme, netloc, parsed.path, urlencode(query_parts), parsed.fragment))
+    fragment = _REDACTED if parsed.fragment else ""
+    return urlunsplit((parsed.scheme, netloc, parsed.path, urlencode(query_parts), fragment))
 
 
 def redact_text(value: str) -> str:
@@ -67,10 +88,28 @@ def redact_text(value: str) -> str:
 
     redacted = _URL_PATTERN.sub(replace_url, value)
 
-    def replace_key_value(match: re.Match[str]) -> str:
-        return f"{match.group('key')}{match.group('separator')}{_REDACTED}"
+    def replace_authorization(match: re.Match[str]) -> str:
+        return (
+            f"{match.group('key_quote')}{match.group('key')}{match.group('key_quote')}"
+            f"{match.group('separator')}{_REDACTED}"
+        )
 
-    return _KEY_VALUE_PATTERN.sub(replace_key_value, redacted)
+    def replace_key_value(match: re.Match[str]) -> str:
+        return (
+            f"{match.group('key_quote')}{match.group('key')}{match.group('key_quote')}"
+            f"{match.group('separator')}{match.group('value_quote')}{_REDACTED}"
+            f"{match.group('value_quote')}"
+        )
+
+    def replace_unquoted_key_value(match: re.Match[str]) -> str:
+        return (
+            f"{match.group('key_quote')}{match.group('key')}{match.group('key_quote')}"
+            f"{match.group('separator')}{_REDACTED}"
+        )
+
+    redacted = _QUOTED_KEY_VALUE_PATTERN.sub(replace_key_value, redacted)
+    redacted = _AUTHORIZATION_PATTERN.sub(replace_authorization, redacted)
+    return _UNQUOTED_KEY_VALUE_PATTERN.sub(replace_unquoted_key_value, redacted)
 
 
 def redact_value(value: Any) -> Any:

@@ -22,7 +22,7 @@ def test_db_upgrade_command_runs_first_migration(
     )
 
     assert result == 0
-    assert "0001_initial" in capsys.readouterr().out
+    assert "0002_cameras" in capsys.readouterr().out
     assert (tmp_path / "data" / "open-licenseplate.sqlite3").is_file()
 
 
@@ -109,6 +109,31 @@ def test_doctor_reports_ready_after_database_upgrade(
     output = capsys.readouterr().out
     assert "database: ok" in output
     assert "result: ready" in output
+
+
+def test_doctor_audit_secrets_reports_managed_files_are_safe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    arguments = [
+        "--data-dir",
+        str(tmp_path / "data"),
+        "--log-dir",
+        str(tmp_path / "logs"),
+    ]
+
+    assert main(["db", "upgrade", *arguments]) == 0
+    capsys.readouterr()
+
+    result = main(["doctor", "--audit-secrets", "--json", *arguments])
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["secret_audit"] == {
+        "files_scanned": 1,
+        "findings": [],
+        "status": "ok",
+    }
 
 
 def test_serve_command_passes_explicit_options_to_uvicorn(

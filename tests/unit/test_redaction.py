@@ -27,6 +27,27 @@ def test_redact_text_handles_urls_and_key_value_secrets() -> None:
     assert "password=[REDACTED]" in redacted
 
 
+def test_redact_text_handles_json_and_authorization_secrets() -> None:
+    value = '{"password":"json-secret","authorization":"Bearer bearer-secret"}'
+
+    redacted = redact_text(value)
+
+    assert redacted == '{"password":"[REDACTED]","authorization":"[REDACTED]"}'
+    assert "json-secret" not in redacted
+    assert "bearer-secret" not in redacted
+
+
+def test_redact_text_keeps_all_rtsp_query_parameters() -> None:
+    value = "rtsp://user:secret@example.test/stream?password=query-secret&token=token-secret"
+
+    redacted = redact_text(value)
+
+    assert "password=[REDACTED]" in redacted
+    assert "token=[REDACTED]" in redacted
+    assert "query-secret" not in redacted
+    assert "token-secret" not in redacted
+
+
 def test_redact_value_recurses_through_diagnostics() -> None:
     value = {
         "url": "rtsp://user:secret@example.test/stream",

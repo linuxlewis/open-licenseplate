@@ -237,7 +237,11 @@ def test_m0_acceptance_from_fresh_fixture(tmp_path: Path, chromium) -> None:
     )
     _assert_cli_success(migration_result)
     assert database_path.is_file()
-    assert _table_names(database_path) == {"alembic_version", "application_settings"}
+    assert _table_names(database_path) == {
+        "alembic_version",
+        "application_settings",
+        "cameras",
+    }
     assert _setting_keys(database_path) == []
 
     first_port = _free_port()
@@ -292,5 +296,9 @@ def test_m0_acceptance_from_fresh_fixture(tmp_path: Path, chromium) -> None:
     assert doctor["ready"] is True
     assert doctor["database"]["status"] == "ok"
     assert all(doctor["directories"].values())
-    assert _table_names(database_path) == {"alembic_version", "application_settings"}
+    assert _table_names(database_path) == {
+        "alembic_version",
+        "application_settings",
+        "cameras",
+    }
     assert _setting_keys(database_path) == ["ui.density"]

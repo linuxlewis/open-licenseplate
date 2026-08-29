@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .app import create_app
+from .cameras.audit import audit_managed_secrets
 from .config import SettingsError, load_settings
 from .database import Database, database_status, upgrade_database
 from .logging import configure_logging
@@ -60,6 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor_parser = commands.add_parser("doctor", help="check local application readiness")
     doctor_parser.add_argument("--json", action="store_true", help="write diagnostics as JSON")
+    doctor_parser.add_argument(
+        "--audit-secrets",
+        action="store_true",
+        help="scan managed files for unredacted secret patterns",
+    )
     _add_runtime_options(doctor_parser)
 
     dev_parser = commands.add_parser("dev", help="development-only commands")
@@ -176,7 +182,12 @@ def _merge_for_cli(base: dict[str, Any], setting_key: str, value: Any) -> dict[s
     return base
 
 
-def _doctor_payload(settings: Any, paths: ManagedPaths) -> tuple[dict[str, Any], bool]:
+def _doctor_payload(
+    settings: Any,
+    paths: ManagedPaths,
+    *,
+    audit_secrets: bool = False,
+) -> tuple[dict[str, Any], bool]:
     directories = paths.directory_checks()
     database = database_status(paths.database)
     payload = {
@@ -198,13 +209,20 @@ def _doctor_payload(settings: Any, paths: ManagedPaths) -> tuple[dict[str, Any],
         "database": database,
         "ready": all(directories.values()) and database["status"] == "ok",
     }
+    if audit_secrets:
+        payload["secret_audit"] = audit_managed_secrets(paths)
+        payload["ready"] = bool(payload["ready"] and payload["secret_audit"]["status"] == "ok")
     return payload, bool(payload["ready"])
 
 
 def _run_doctor(arguments: argparse.Namespace) -> int:
     settings, paths = _load_cli_settings(arguments)
     paths.ensure_directories()
-    payload, ready = _doctor_payload(settings, paths)
+    payload, ready = _doctor_payload(
+        settings,
+        paths,
+        audit_secrets=arguments.audit_secrets,
+    )
     if arguments.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -217,6 +235,11 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
         print(f"database detail: {database['detail']}")
         if database["current_revision"] is not None:
             print(f"database revision: {database['current_revision']}")
+        if "secret_audit" in payload:
+            audit = payload["secret_audit"]
+            print(f"secret audit: {audit['status']}")
+            for finding in audit["findings"]:
+                print(f"secret audit detail: {finding}")
         print(f"result: {'ready' if ready else 'not ready'}")
     return 0 if ready else 1
 
