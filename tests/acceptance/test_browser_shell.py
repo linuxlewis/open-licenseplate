@@ -148,6 +148,68 @@ def fake_browser_base_url(tmp_path: Path) -> Iterator[str]:
     thread.join(timeout=5)
 
 
+@pytest.fixture
+def fake_live_browser_base_url(tmp_path: Path) -> Iterator[str]:
+    settings = load_settings(
+        cli_overrides={
+            "storage.data_dir": tmp_path / "data",
+            "storage.log_dir": tmp_path / "logs",
+        }
+    )
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    source_factory = ReconnectFixture(
+        (
+            FixtureAttempt(
+                frames=(make_preview_frame(180, width=640, height=360),),
+                repeat=True,
+                read_interval_seconds=0.01,
+            ),
+        )
+    )
+
+    def outputs(_prepared: Any) -> dict[str, Any]:
+        return {
+            "coordinates": np.array([[0, 140, 640, 500]], dtype=np.float32),
+            "confidence": np.array([0.9], dtype=np.float32),
+        }
+
+    backend = FakeBackend(output_factory=outputs)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(
+                settings,
+                source_factory=source_factory,
+                inference_backend_factory=lambda: backend,
+            ),
+            host="127.0.0.1",
+            port=_free_port(),
+            log_config=None,
+            access_log=False,
+        )
+    )
+    server.install_signal_handlers = lambda: None
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.config.port}"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.get(f"{base_url}/live", timeout=0.5)
+            if response.status_code == 200:
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.05)
+    else:
+        server.should_exit = True
+        thread.join(timeout=5)
+        raise RuntimeError("fake live browser test server did not start")
+
+    yield base_url
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
 @pytest.mark.browser
 def test_browser_can_visit_every_page_and_use_primary_navigation(
     browser_base_url: str,
@@ -233,6 +295,69 @@ def test_browser_can_start_stop_preview_and_show_safe_runtime_state(
     page.get_by_role("button", name="Stop", exact=True).click()
     page.get_by_text("Stopped", exact=True).wait_for(timeout=3000)
     assert page.locator("#live-preview").is_hidden()
+
+
+@pytest.mark.browser
+def test_browser_can_run_detection_change_threshold_resize_overlay_and_stop(
+    fake_live_browser_base_url: str,
+    chromium,
+    tmp_path: Path,
+) -> None:
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id="browser-live-model",
+    )
+    page = chromium.new_page(viewport={"width": 1280, "height": 1000})
+    page.goto(f"{fake_live_browser_base_url}/cameras", wait_until="domcontentloaded")
+    page.get_by_label("Name", exact=True).fill("Live fixture")
+    page.get_by_label("RTSP endpoint", exact=True).fill("rtsp://fixture.local/live")
+    page.get_by_role("button", name="Save camera", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/cameras?notice=created")
+
+    page.goto(f"{fake_live_browser_base_url}/models", wait_until="domcontentloaded")
+    page.locator("#model-manifest").set_input_files(str(manifest_path))
+    page.locator("#model-archive").set_input_files(str(archive_path))
+    page.get_by_role("button", name="Import model", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/models?notice=imported")
+    page.get_by_role("button", name="Validate package", exact=True).click()
+    page.wait_for_url(f"{fake_live_browser_base_url}/models?notice=validated")
+
+    page.goto(f"{fake_live_browser_base_url}/live", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Start detection", exact=True).click()
+    page.locator("#live-processed-preview").wait_for(state="visible", timeout=5000)
+    page.locator("#live-overlay").wait_for(state="visible", timeout=5000)
+    page.locator("#live-processed-sequence").filter(has_text="1").wait_for(timeout=5000)
+    assert page.locator("#live-processed-prediction").inner_text().endswith(" ms")
+    assert page.locator("#live-processed-p50").inner_text().endswith(" ms")
+    assert page.locator("#live-processed-p95").inner_text().endswith(" ms")
+
+    image_box = page.locator("#live-processed-preview").bounding_box()
+    canvas_box = page.locator("#live-overlay").bounding_box()
+    assert image_box is not None
+    assert canvas_box is not None
+    assert abs(image_box["width"] - canvas_box["width"]) < 1
+    assert abs(image_box["height"] - canvas_box["height"]) < 1
+
+    page.locator("#live-threshold").fill("0.95")
+    page.locator("#live-threshold").press("Tab")
+    page.get_by_text(
+        "Confidence threshold updated without reloading the model.",
+        exact=True,
+    ).wait_for(timeout=3000)
+
+    page.set_viewport_size({"width": 520, "height": 900})
+    page.wait_for_timeout(200)
+    resized_image_box = page.locator("#live-processed-preview").bounding_box()
+    resized_canvas_box = page.locator("#live-overlay").bounding_box()
+    assert resized_image_box is not None
+    assert resized_canvas_box is not None
+    assert abs(resized_image_box["width"] - resized_canvas_box["width"]) < 1
+    assert abs(resized_image_box["height"] - resized_canvas_box["height"]) < 1
+
+    page.get_by_role("button", name="Stop detection", exact=True).click()
+    page.get_by_text("Detection is stopped", exact=True).wait_for(timeout=5000)
+    assert page.locator("#live-processed-preview").is_hidden()
+    assert page.locator("#live-overlay").count() == 0
 
 
 @pytest.mark.browser

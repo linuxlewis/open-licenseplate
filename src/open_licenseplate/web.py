@@ -47,14 +47,12 @@ PAGES = (
         eyebrow="Operations",
         title="Live view",
         description=(
-            "Start one camera, inspect safe stream metadata, and watch reconnect recovery."
+            "Run synchronized live detection with exact-frame overlays while keeping the raw "
+            "camera preview available."
         ),
         empty_title="No live source is configured",
-        empty_description=(
-            "Add a camera profile, then start it here. M1 shows the current preview and "
-            "connection health without detection overlays."
-        ),
-        planned_milestone="M1",
+        empty_description=("Add a camera and validate a model, then start live detection here."),
+        planned_milestone="M3-B",
     ),
     PageDefinition(
         key="events",
@@ -342,6 +340,7 @@ def _context(
     directories = paths.directory_checks()
     page = PAGE_BY_KEY[active_key]
     runtime_status = request.app.state.camera_runtime.status().as_dict()
+    live_status = request.app.state.live_pipeline.status().as_dict()
     cameras = _camera_rows(paths, database)
     selected_camera_id = (
         runtime_status.get("camera_id")
@@ -372,7 +371,9 @@ def _context(
         "camera_feedback": _camera_feedback(request),
         "model_feedback": _model_feedback(request),
         "runtime_status": runtime_status,
+        "live_status": live_status,
         "selected_camera_id": selected_camera_id,
+        "selected_model_id": live_status.get("model_id"),
     }
 
 
