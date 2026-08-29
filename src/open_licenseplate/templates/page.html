@@ -104,7 +104,12 @@
                   </button>
                 </div>
                 <p class="live-message" id="live-message" role="status">
-                  {% if cameras %}
+                  {% if runtime_status.state == "failed" %}
+                    The source failed to open{% if runtime_status.last_error %}: {{ runtime_status.last_error }}{% endif %}.
+                    Fix the source settings, then press Start preview.
+                  {% elif runtime_status.state == "stopping" %}
+                    Stopping the camera and releasing source resources.
+                  {% elif cameras %}
                     Select a camera and start the preview.
                   {% else %}
                     Add a camera profile before starting a preview.

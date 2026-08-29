@@ -56,7 +56,15 @@
       preview.hidden = true;
       previewEmpty.hidden = false;
       snapshot.hidden = true;
-      if (status.last_error) {
+      if (state === "failed") {
+        const detail = status.last_error || "The source did not open.";
+        setMessage(
+          `The camera failed to open: ${detail} Fix the source settings, then press Start preview.`,
+          "attention",
+        );
+      } else if (state === "stopping") {
+        setMessage("Stopping the camera and releasing source resources.");
+      } else if (status.last_error) {
         setMessage(status.last_error, "attention");
       } else if (state === "connecting" || state === "reconnecting") {
         setMessage("Connecting to the camera. The source is not ready yet.");

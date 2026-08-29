@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from ..cameras.repository import CameraConfig
 from ..redaction import redact_text, redact_value
@@ -15,8 +15,36 @@ from .broker import LatestFrameBroker
 from .contracts import Clock, FrameSource, SourceError, SourceInfo, SystemClock, VideoFrame
 from .worker import FrameCaptureWorker
 
-LifecycleState = Literal["stopped", "connecting", "streaming", "degraded", "reconnecting"]
+LifecycleState = Literal[
+    "stopped",
+    "connecting",
+    "streaming",
+    "degraded",
+    "reconnecting",
+    "stopping",
+    "failed",
+]
 SourceFactory = Callable[[CameraConfig, str], FrameSource]
+
+
+class WaitScheduler(Protocol):
+    """Wait for a stop signal without coupling time to the runtime."""
+
+    def wait(self, stop_requested: threading.Event, timeout: float) -> bool:
+        """Wait for a timeout or a stop signal and return whether stopped."""
+
+    def wake(self) -> None:
+        """Wake a wait that is in progress."""
+
+
+class EventWaitScheduler:
+    """Use a real event wait for production runtime execution."""
+
+    def wait(self, stop_requested: threading.Event, timeout: float) -> bool:
+        return stop_requested.wait(max(0.0, timeout))
+
+    def wake(self) -> None:
+        """The event itself wakes when it is set."""
 
 
 class ActiveCameraConflict(RuntimeError):
@@ -59,6 +87,102 @@ class ReconnectBackoff:
         jitter = (float(self.random_value()) * 2 - 1) * self.jitter_ratio
         result = max(0.0, min(self.cap_seconds, exponential * (1 + jitter)))
         return float(result)
+
+
+class ReconnectStateMachine:
+    """Clock-driven state machine for initial open, disconnect, and stop."""
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        backoff: ReconnectBackoff,
+        stable_stream_seconds: float,
+    ) -> None:
+        self._clock = clock
+        self._backoff = backoff
+        self._stable_stream_seconds = stable_stream_seconds
+        self.state: LifecycleState = "stopped"
+        self.reconnect_attempt = 0
+        self.next_retry_at: float | None = None
+        self.last_error: str | None = None
+        self.has_successful_session = False
+        self._stable_since: float | None = None
+        self._history: list[LifecycleState] = ["stopped"]
+
+    @property
+    def history(self) -> tuple[LifecycleState, ...]:
+        """Return the state transitions for the current runtime generation."""
+        return tuple(self._history)
+
+    def start(self) -> None:
+        """Enter the initial connection attempt."""
+        self._transition("connecting")
+        self.reconnect_attempt = 0
+        self.next_retry_at = None
+        self.last_error = None
+        self.has_successful_session = False
+        self._stable_since = None
+
+    def opened(self) -> None:
+        """Record a successful source open and start the stable timer."""
+        self.has_successful_session = True
+        self._stable_since = self._clock.monotonic()
+        self.next_retry_at = None
+        self.last_error = None
+        self._transition("streaming")
+
+    def initial_open_failed(self, error: str) -> None:
+        """Enter terminal failed state for an initial source-open error."""
+        if self.has_successful_session:
+            self.disconnected(error)
+            return
+        self.last_error = redact_text(error)
+        self.next_retry_at = None
+        self._transition("failed")
+
+    def disconnected(self, error: str) -> None:
+        """Enter degraded state after a previously successful session ends."""
+        self.last_error = redact_text(error)
+        self.next_retry_at = None
+        self._transition("degraded")
+
+    def schedule_reconnect(self) -> float:
+        """Enter reconnecting state and return its bounded wait duration."""
+        if not self.has_successful_session:
+            raise RuntimeError("reconnect is not available before a successful session")
+        self.reconnect_attempt += 1
+        delay = self._backoff.delay_for(self.reconnect_attempt)
+        self.next_retry_at = self._clock.monotonic() + delay
+        self._transition("reconnecting")
+        return delay
+
+    def poll_stability(self) -> bool:
+        """Reset retry state after the stream remains stable long enough."""
+        if (
+            self.state != "streaming"
+            or self._stable_since is None
+            or self._clock.monotonic() - self._stable_since < self._stable_stream_seconds
+        ):
+            return False
+        self.reconnect_attempt = 0
+        return True
+
+    def stopping(self) -> None:
+        """Record a user or application stop request."""
+        self.next_retry_at = None
+        self._transition("stopping")
+
+    def stopped(self) -> None:
+        """Record that all owned resources are closed."""
+        self.next_retry_at = None
+        self.reconnect_attempt = 0
+        self._transition("stopped")
+
+    def _transition(self, state: LifecycleState) -> None:
+        if self.state != state:
+            self.state = state
+            self._history.append(state)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +246,7 @@ class CameraRuntime:
         poll_interval_seconds: float = 0.05,
         worker_stop_timeout_seconds: float = 2.0,
         degraded_hold_seconds: float = 0.05,
+        scheduler: WaitScheduler | None = None,
     ) -> None:
         if stable_stream_seconds < 0:
             raise ValueError("stable_stream_seconds must not be negative")
@@ -136,6 +261,7 @@ class CameraRuntime:
         self._poll_interval_seconds = poll_interval_seconds
         self._worker_stop_timeout_seconds = worker_stop_timeout_seconds
         self._degraded_hold_seconds = degraded_hold_seconds
+        self._scheduler = scheduler or EventWaitScheduler()
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._stop_requested = threading.Event()
@@ -153,6 +279,11 @@ class CameraRuntime:
         self._counters = RuntimeCounters()
         self._last_camera_id: str | None = None
         self._last_camera_name: str | None = None
+        self._state_machine = ReconnectStateMachine(
+            clock=self._clock,
+            backoff=self._backoff,
+            stable_stream_seconds=self._stable_stream_seconds,
+        )
 
     def start(self, camera_id: str, camera: CameraConfig) -> CameraRuntimeStatus:
         """Start one camera asynchronously and return its connecting status."""
@@ -169,11 +300,14 @@ class CameraRuntime:
             self._camera_config = camera
             self._last_camera_id = camera_id
             self._last_camera_name = camera.name
+            self._state_machine = ReconnectStateMachine(
+                clock=self._clock,
+                backoff=self._backoff,
+                stable_stream_seconds=self._stable_stream_seconds,
+            )
+            self._state_machine.start()
             self._source_info = None
-            self._state = "connecting"
-            self._reconnect_attempt = 0
-            self._next_retry_at = None
-            self._last_error = None
+            self._sync_state_machine_locked()
             self._counters = RuntimeCounters()
             self._worker = None
             self._broker = None
@@ -196,7 +330,10 @@ class CameraRuntime:
                         detail="camera is not active",
                         inactive=True,
                     )
-                self._state = "stopped"
+                if self._state != "stopped":
+                    self._state_machine.stopping()
+                    self._state_machine.stopped()
+                    self._sync_state_machine_locked()
                 return self._status_locked()
             if camera_id is not None and self._camera_id != camera_id:
                 return self._status_locked(
@@ -208,6 +345,9 @@ class CameraRuntime:
             thread = self._thread
             worker = self._worker
             self._stop_requested.set()
+            self._state_machine.stopping()
+            self._sync_state_machine_locked()
+            self._scheduler.wake()
             self._condition.notify_all()
 
         if worker is not None:
@@ -218,9 +358,8 @@ class CameraRuntime:
             raise RuntimeError("camera runtime did not stop before the deadline")
 
         with self._condition:
-            self._state = "stopped"
-            self._next_retry_at = None
-            self._reconnect_attempt = 0
+            self._state_machine.stopped()
+            self._sync_state_machine_locked()
             self._condition.notify_all()
             return self._status_locked()
 
@@ -241,6 +380,29 @@ class CameraRuntime:
                     detail=f"camera {camera_id} is not active",
                     inactive=True,
                 )
+            return self._status_locked()
+
+    @property
+    def state_history(self) -> tuple[LifecycleState, ...]:
+        """Return state transitions for the current camera run."""
+        with self._condition:
+            return self._state_machine.history
+
+    def wait_for_state(
+        self,
+        state: LifecycleState,
+        *,
+        timeout: float = 5.0,
+        after_history_index: int = 0,
+    ) -> CameraRuntimeStatus:
+        """Wait for one state without polling or sleeping in the caller."""
+        with self._condition:
+            reached = self._condition.wait_for(
+                lambda: state in self._state_machine.history[after_history_index:],
+                timeout=max(0.0, timeout),
+            )
+            if not reached:
+                raise TimeoutError(f"camera runtime did not reach {state}")
             return self._status_locked()
 
     def latest_frame(self, camera_id: str) -> VideoFrame | None:
@@ -284,17 +446,15 @@ class CameraRuntime:
     def active_camera_id(self) -> str | None:
         """Return the active camera identifier, if any."""
         with self._condition:
-            return self._camera_id if self._state != "stopped" else None
+            return self._camera_id if self._state not in {"stopped", "failed"} else None
 
     def _run(self) -> None:
-        first_attempt = True
-        retry_index = 0
+        initial_attempt = True
         try:
             while not self._stop_requested.is_set():
-                self._set_state("connecting" if first_attempt else "reconnecting")
                 broker = LatestFrameBroker()
                 worker: FrameCaptureWorker | None = None
-                stream_started: float | None = None
+                opened = False
                 failure: str | None = None
                 try:
                     with self._condition:
@@ -314,20 +474,19 @@ class CameraRuntime:
                     while not self._stop_requested.is_set():
                         worker_metrics = worker.metrics()
                         source_info = worker.source_info
-                        if source_info is not None and stream_started is None:
-                            stream_started = self._clock.monotonic()
+                        if source_info is not None and not opened:
                             self._set_streaming(source_info)
-                        if (
-                            stream_started is not None
-                            and self._clock.monotonic() - stream_started
-                            >= self._stable_stream_seconds
-                        ):
-                            retry_index = 0
-                            self._set_reconnect_attempt(0)
+                            opened = True
+                        if opened:
+                            self._poll_stability()
                         if not worker_metrics.running:
                             failure = worker_metrics.error or "camera stream ended"
                             break
-                        self._stop_requested.wait(self._poll_interval_seconds)
+                        if self._scheduler.wait(
+                            self._stop_requested,
+                            self._poll_interval_seconds,
+                        ):
+                            break
 
                     if self._stop_requested.is_set():
                         break
@@ -341,9 +500,11 @@ class CameraRuntime:
                 finally:
                     if worker is not None:
                         self._accumulate(
-                            worker.metrics(), reconnect=not self._stop_requested.is_set()
+                            worker.metrics(),
+                            reconnect=(opened or not initial_attempt)
+                            and not self._stop_requested.is_set(),
                         )
-                    elif not self._stop_requested.is_set():
+                    elif not initial_attempt and not self._stop_requested.is_set():
                         self._record_reconnect()
                     broker.close()
                     with self._condition:
@@ -356,27 +517,27 @@ class CameraRuntime:
                 if self._stop_requested.is_set():
                     break
 
-                if stream_started is not None and (
-                    self._clock.monotonic() - stream_started >= self._stable_stream_seconds
-                ):
-                    retry_index = 0
-                self._set_degraded(failure or "camera stream ended")
-                if self._stop_requested.wait(self._degraded_hold_seconds):
+                if not opened and initial_attempt and not self._has_successful_session():
+                    self._set_failed(failure or "camera source could not be opened")
                     break
-                retry_index += 1
-                delay = self._backoff.delay_for(retry_index)
-                self._set_reconnecting(retry_index, delay)
-                first_attempt = False
-                if self._stop_requested.wait(delay):
+                self._set_degraded(failure or "camera stream ended")
+                if self._scheduler.wait(
+                    self._stop_requested,
+                    self._degraded_hold_seconds,
+                ):
+                    break
+                delay = self._schedule_reconnect()
+                initial_attempt = False
+                if self._scheduler.wait(self._stop_requested, delay):
                     break
         finally:
             with self._condition:
                 self._worker = None
                 finished_broker = self._broker
                 self._broker = None
-                self._state = "stopped"
-                self._next_retry_at = None
-                self._reconnect_attempt = 0
+                if self._stop_requested.is_set() or self._state != "failed":
+                    self._state_machine.stopped()
+                    self._sync_state_machine_locked()
                 self._condition.notify_all()
             if finished_broker is not None:
                 finished_broker.close()
@@ -384,35 +545,44 @@ class CameraRuntime:
     def _set_streaming(self, source_info: SourceInfo) -> None:
         with self._condition:
             self._source_info = source_info
-            self._state = "streaming"
-            self._next_retry_at = None
-            self._last_error = None
+            self._state_machine.opened()
+            self._sync_state_machine_locked()
             self._condition.notify_all()
 
     def _set_degraded(self, error: str) -> None:
         with self._condition:
-            self._state = "degraded"
-            self._last_error = redact_text(error)
-            self._next_retry_at = None
+            self._state_machine.disconnected(error)
+            self._sync_state_machine_locked()
             self._condition.notify_all()
 
-    def _set_reconnecting(self, attempt: int, delay: float) -> None:
+    def _set_failed(self, error: str) -> None:
         with self._condition:
-            self._state = "reconnecting"
-            self._reconnect_attempt = attempt
-            self._next_retry_at = self._clock.monotonic() + delay
+            self._state_machine.initial_open_failed(error)
+            self._sync_state_machine_locked()
             self._condition.notify_all()
 
-    def _set_state(self, state: LifecycleState) -> None:
+    def _schedule_reconnect(self) -> float:
         with self._condition:
-            self._state = state
-            self._next_retry_at = None
+            delay = self._state_machine.schedule_reconnect()
+            self._sync_state_machine_locked()
+            self._condition.notify_all()
+            return delay
+
+    def _poll_stability(self) -> None:
+        with self._condition:
+            self._state_machine.poll_stability()
+            self._sync_state_machine_locked()
             self._condition.notify_all()
 
-    def _set_reconnect_attempt(self, attempt: int) -> None:
+    def _has_successful_session(self) -> bool:
         with self._condition:
-            self._reconnect_attempt = attempt
-            self._condition.notify_all()
+            return self._state_machine.has_successful_session
+
+    def _sync_state_machine_locked(self) -> None:
+        self._state = self._state_machine.state
+        self._reconnect_attempt = self._state_machine.reconnect_attempt
+        self._next_retry_at = self._state_machine.next_retry_at
+        self._last_error = self._state_machine.last_error
 
     def _accumulate(self, metrics: Any, *, reconnect: bool) -> None:
         with self._condition:
@@ -478,7 +648,7 @@ class CameraRuntime:
             metrics=metrics,
             active_camera_id=(
                 self._camera_id
-                if self._camera_id is not None and self._state != "stopped"
+                if self._camera_id is not None and self._state not in {"stopped", "failed"}
                 else None
             ),
             detail=detail,
@@ -519,8 +689,11 @@ __all__ = [
     "ActiveCameraConflict",
     "CameraRuntime",
     "CameraRuntimeStatus",
+    "EventWaitScheduler",
     "LifecycleState",
     "ReconnectBackoff",
+    "ReconnectStateMachine",
     "RuntimeCounters",
     "SourceFactory",
+    "WaitScheduler",
 ]

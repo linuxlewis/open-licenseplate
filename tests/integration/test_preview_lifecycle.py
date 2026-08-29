@@ -128,3 +128,30 @@ def test_starting_a_second_camera_returns_conflict_and_reconnect_recovers(
         assert status["metrics"]["reconnect_count"] >= 1
 
         client.post(f"/api/v1/cameras/{first_id}/stop")
+
+
+def test_initial_source_open_error_reports_failed_without_reconnect(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    fixture = ReconnectFixture((FixtureAttempt(open_error="fixture source is unavailable"),))
+    application = create_app(settings, source_factory=fixture)
+
+    with TestClient(application) as client:
+        camera_id = _create_camera(client, "Unavailable")
+        started = client.post(f"/api/v1/cameras/{camera_id}/start")
+        assert started.status_code == 200
+        failed = application.state.camera_runtime.wait_for_state("failed")
+
+        status = client.get(f"/api/v1/cameras/{camera_id}/status")
+        assert status.status_code == 200
+        assert status.json()["state"] == "failed"
+        assert status.json()["reconnect_attempt"] == 0
+        assert "fixture source is unavailable" in status.json()["last_error"]
+        assert fixture.created_attempts == 1
+        assert "active_camera_id" not in status.json()
+        assert failed.state == "failed"
+        live_page = client.get("/live")
+        assert "Failed" in live_page.text
+        assert "Fix the source settings, then press Start preview." in live_page.text

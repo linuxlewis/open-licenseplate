@@ -68,10 +68,13 @@ GET  /api/v1/cameras/{camera_id}/preview.mjpeg
 GET  /api/v1/cameras/{camera_id}/snapshot.jpg
 ```
 
-The lifecycle states are `stopped`, `connecting`, `streaming`, `degraded`, and
-`reconnecting`. Reconnect uses bounded exponential backoff with jitter. A
-stable stream resets the retry delay. Stop cancels a reconnect wait and closes
-the source, broker, and capture worker.
+The lifecycle states are `stopped`, `connecting`, `streaming`, `degraded`,
+`reconnecting`, `stopping`, and `failed`. An initial source-open error enters
+`failed` with an action message. It does not retry. A disconnect after a
+successful session enters `degraded`, then `reconnecting`. Reconnect uses
+bounded exponential backoff with jitter. A stable stream resets the retry
+delay. Stop enters `stopping`, cancels a reconnect wait, and closes the source,
+broker, and capture worker.
 
 Audit managed files for unredacted secret patterns with:
 
@@ -104,7 +107,7 @@ The snapshot endpoint returns the newest frame as one JPEG.
 
 ### Deterministic reconnect fixture
 
-The test suite uses an in-memory fixture. It sends one frame, injects a decode
+The test suite keeps an in-memory fixture. It sends one frame, injects a decode
 disconnect, waits through a short reconnect delay, and then repeats new frames.
 It is safe to run on Linux, macOS, or another host without camera access:
 
@@ -116,6 +119,25 @@ The fixture uses `ReconnectFixture` and `FixtureAttempt` from
 `open_licenseplate.capture`. Production code still uses `PyAVRTSPSource` for
 real RTSP cameras. No fixture password or complete secret URL is written to
 logs, SQLite, HTML, API output, or diagnostics.
+
+The recorded-stream integration fixture creates a small deterministic Matroska
+file with PyAV, then opens it through `RecordedVideoSource`:
+
+```bash
+uv run pytest tests/integration/test_stream_fixture.py -q
+```
+
+This is the default local stream check because this repository environment does
+not include an RTSP server. On macOS or Linux with a local RTSP server, set the
+fixture URL and run the optional test:
+
+```bash
+OPEN_LICENSEPLATE_RTSP_URL=rtsp://127.0.0.1:8554/fixture \
+  uv run pytest tests/integration/test_stream_fixture.py -q
+```
+
+The optional test expects the local server to publish the same URL. It uses
+TCP and does not print the URL.
 
 ### M1 manual validation
 
