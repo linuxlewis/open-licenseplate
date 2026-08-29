@@ -46,14 +46,14 @@ PAGES = (
         eyebrow="Operations",
         title="Live view",
         description=(
-            "The live camera surface will keep the current frame and detection state in view."
+            "Start one camera, inspect safe stream metadata, and watch reconnect recovery."
         ),
         empty_title="No live source is configured",
         empty_description=(
-            "Camera connection and detection controls will appear here in a later milestone. "
-            "The shell is ready for those controls."
+            "Add a camera profile, then start it here. M1 shows the current preview and "
+            "connection health without detection overlays."
         ),
-        planned_milestone="M1 and M3",
+        planned_milestone="M1",
     ),
     PageDefinition(
         key="events",
@@ -90,8 +90,7 @@ PAGES = (
         eyebrow="Sources",
         title="Camera sources",
         description=(
-            "Save RTSP camera profiles with external credential references. "
-            "The configuration test does not open a network stream in this slice."
+            "Save RTSP camera profiles, test a source, and keep credential values outside the app."
         ),
         empty_title="No cameras configured",
         empty_description=(
@@ -198,12 +197,20 @@ def _path_rows(paths: ManagedPaths) -> list[dict[str, str]]:
     return [{"label": label, "value": str(path)} for label, path in values]
 
 
-def _runtime_rows() -> list[dict[str, str]]:
+def _runtime_rows(runtime_status: dict[str, Any]) -> list[dict[str, str]]:
+    camera_id = runtime_status.get("camera_id")
+    state = str(runtime_status.get("state", "stopped"))
+    if camera_id and state != "stopped":
+        camera_value = str(runtime_status.get("camera_name") or camera_id)
+        camera_detail = f"Lifecycle: {state}"
+    else:
+        camera_value = "Not configured"
+        camera_detail = "No camera is running."
     return [
         {
             "label": "Active camera",
-            "value": "Not configured",
-            "detail": "Camera support is not part of M0.",
+            "value": camera_value,
+            "detail": camera_detail,
         },
         {
             "label": "Active model",
@@ -278,6 +285,13 @@ def _context(
     database = _database_summary(paths)
     directories = paths.directory_checks()
     page = PAGE_BY_KEY[active_key]
+    runtime_status = request.app.state.camera_runtime.status().as_dict()
+    cameras = _camera_rows(paths, database)
+    selected_camera_id = (
+        runtime_status.get("camera_id")
+        if runtime_status.get("camera_id") in {camera["id"] for camera in cameras}
+        else (cameras[0]["id"] if cameras else None)
+    )
     return {
         "request": request,
         "app_name": settings.app_name,
@@ -287,7 +301,7 @@ def _context(
         "nav_items": _nav_items(active_key),
         "global_status": _global_status(database, directories),
         "global_runtime": {
-            "camera": "Not configured",
+            "camera": runtime_status.get("camera_name") or "Stopped",
             "model": "Not loaded",
             "worker": "Not started",
             "failures": "None",
@@ -295,10 +309,12 @@ def _context(
         "database": database,
         "settings": _setting_rows(settings),
         "managed_paths": _path_rows(paths),
-        "runtime": _runtime_rows(),
+        "runtime": _runtime_rows(runtime_status),
         "directory_checks": directories,
-        "cameras": _camera_rows(paths, database),
+        "cameras": cameras,
         "camera_feedback": _camera_feedback(request),
+        "runtime_status": runtime_status,
+        "selected_camera_id": selected_camera_id,
     }
 
 

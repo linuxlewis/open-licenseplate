@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from .cameras.api import camera_test_payload
 from .cameras.api import router as camera_api_router
 from .cameras.repository import CameraRepository
 from .cameras.service import CameraConfigurationError, prepare_camera_config
+from .capture import CameraRuntime, PyAVRTSPSource, SourceFactory
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
 from .logging import configure_logging
@@ -71,10 +73,21 @@ def _readiness_payload(settings: AppSettings, paths: ManagedPaths) -> tuple[dict
     return payload, 200 if ready else 503
 
 
-def create_app(settings: AppSettings | None = None) -> FastAPI:
+def _default_source_factory(camera: Any, camera_id: str) -> Any:
+    """Create the production RTSP source at the runtime boundary."""
+    return PyAVRTSPSource(camera, camera_id=camera_id)
+
+
+def create_app(
+    settings: AppSettings | None = None,
+    *,
+    source_factory: SourceFactory | None = None,
+) -> FastAPI:
     """Create the application without starting a server."""
     effective_settings = settings or load_settings()
     paths = ManagedPaths.from_settings(effective_settings)
+    effective_source_factory = source_factory or _default_source_factory
+    camera_runtime = CameraRuntime(effective_source_factory)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -91,6 +104,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            await asyncio.to_thread(camera_runtime.close)
             application.state.startup_complete = False
             logger.info("application stopped")
 
@@ -102,6 +116,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     application.state.settings = effective_settings
     application.state.paths = paths
     application.state.startup_complete = False
+    application.state.camera_runtime = camera_runtime
+    application.state.camera_source_factory = effective_source_factory
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)
 
@@ -207,7 +223,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             camera = CameraRepository(database).get(camera_id)
             if camera is None:
                 return _camera_redirect("missing")
-            result = camera_test_payload(camera)
+            result = await asyncio.to_thread(
+                camera_test_payload,
+                camera,
+                source_factory=effective_source_factory,
+                network=True,
+            )
         finally:
             database.dispose()
         return _camera_redirect(
@@ -272,6 +293,27 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     async def ready_health() -> JSONResponse:
         payload, status_code = _readiness_payload(effective_settings, paths)
         return JSONResponse(content=payload, status_code=status_code)
+
+    @application.get("/api/v1/live/state")
+    async def live_state() -> dict[str, Any]:
+        return camera_runtime.status().as_dict()
+
+    @application.get("/api/v1/system/status")
+    async def system_status() -> dict[str, Any]:
+        database = database_status(paths.database)
+        return {
+            "application": effective_settings.app_name,
+            "version": __version__,
+            "database": database,
+            "directories": paths.directory_checks(),
+            "runtime": camera_runtime.status().as_dict(),
+        }
+
+    @application.get("/api/v1/system/metrics")
+    async def system_metrics() -> dict[str, Any]:
+        return {
+            "camera": camera_runtime.status().as_dict(),
+        }
 
     return application
 

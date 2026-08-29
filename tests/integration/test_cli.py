@@ -3,8 +3,12 @@ from pathlib import Path
 
 import pytest
 
+from open_licenseplate.cameras.repository import CameraRepository
+from open_licenseplate.cameras.service import prepare_camera_config
 from open_licenseplate.cli import main
 from open_licenseplate.config import SettingsError
+from open_licenseplate.database import Database
+from open_licenseplate.paths import ManagedPaths
 
 SECRET_RTSP_URL = (
     "rtsp://camera-user:camera-password@example.test/stream"
@@ -140,6 +144,41 @@ def test_doctor_audit_secrets_reports_managed_files_are_safe(
         "findings": [],
         "status": "ok",
     }
+
+
+def test_doctor_audit_secrets_checks_resolved_values_in_logs_and_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data_dir = tmp_path / "data"
+    log_dir = tmp_path / "logs"
+    arguments = ["--data-dir", str(data_dir), "--log-dir", str(log_dir)]
+    assert main(["db", "upgrade", *arguments]) == 0
+    capsys.readouterr()
+
+    monkeypatch.setenv("CAMERA_RTSP_URL", SECRET_RTSP_URL)
+    paths = ManagedPaths.from_roots(data_dir, log_dir)
+    database = Database(paths.database)
+    try:
+        CameraRepository(database).create(
+            prepare_camera_config(
+                name="Front gate",
+                rtsp_url="rtsp://example.test/stream",
+                credential_ref="env:CAMERA_RTSP_URL",
+            )
+        )
+    finally:
+        database.dispose()
+    paths.app_log.write_text(SECRET_RTSP_URL, encoding="utf-8")
+
+    result = main(["doctor", "--audit-secrets", "--json", *arguments])
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["secret_audit"]["status"] == "failed"
+    assert any("application log" in finding for finding in payload["secret_audit"]["findings"])
+    assert "camera-password" not in json.dumps(payload)
 
 
 def test_serve_command_passes_explicit_options_to_uvicorn(

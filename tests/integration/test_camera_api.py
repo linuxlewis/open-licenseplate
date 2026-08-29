@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from open_licenseplate.app import create_app
+from open_licenseplate.capture import FixtureAttempt, ReconnectFixture, make_preview_frame
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import upgrade_database
 
@@ -31,7 +32,10 @@ def test_camera_api_crud_and_test_operation_redact_secrets(
         "rtsp://operator:secret-value@example.test:554/live?token=query-value",
     )
 
-    with TestClient(create_app(settings)) as client:
+    source_factory = ReconnectFixture(
+        (FixtureAttempt(frames=(make_preview_frame(16),), repeat=True),)
+    )
+    with TestClient(create_app(settings, source_factory=source_factory)) as client:
         create = client.post(
             "/api/v1/cameras",
             json={

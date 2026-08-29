@@ -11,9 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from .app import create_app
+from .cameras.api import camera_payload
 from .cameras.audit import audit_managed_secrets
+from .cameras.credentials import parse_credential_ref, resolve_credential
+from .cameras.repository import CameraRepository
 from .config import SettingsError, load_settings
 from .database import Database, database_status, upgrade_database
+from .diagnostics import build_diagnostics
 from .logging import configure_logging
 from .paths import ManagedPaths
 from .redaction import redact_text
@@ -211,9 +215,78 @@ def _doctor_payload(
         "ready": all(directories.values()) and database["status"] == "ok",
     }
     if audit_secrets:
-        payload["secret_audit"] = audit_managed_secrets(paths)
+        payload["secret_audit"] = audit_managed_secrets(
+            paths,
+            extra_texts=_audit_surface_texts(settings, paths),
+            secret_values=_external_secret_values(paths),
+        )
         payload["ready"] = bool(payload["ready"] and payload["secret_audit"]["status"] == "ok")
     return payload, bool(payload["ready"])
+
+
+def _audit_surface_texts(settings: Any, paths: ManagedPaths) -> dict[str, str]:
+    """Collect safe HTML, API, and diagnostics representations for auditing."""
+    template_path = Path(__file__).resolve().parent / "templates" / "page.html"
+    surfaces = {"html template": template_path.read_text(encoding="utf-8")}
+    database_payload: dict[str, Any] = {"cameras": []}
+    if database_status(paths.database)["status"] == "ok":
+        database = Database(paths.database)
+        try:
+            database_payload["cameras"] = [
+                camera_payload(camera) for camera in CameraRepository(database).list()
+            ]
+        finally:
+            database.dispose()
+    surfaces["api output"] = json.dumps(database_payload, ensure_ascii=True, sort_keys=True)
+    surfaces["diagnostics"] = json.dumps(
+        build_diagnostics(settings, paths),
+        ensure_ascii=True,
+        sort_keys=True,
+    )
+    return surfaces
+
+
+def _external_secret_values(paths: ManagedPaths) -> tuple[str, ...]:
+    """Resolve configured credentials only for in-process comparison."""
+    if database_status(paths.database)["status"] != "ok":
+        return ()
+    values: set[str] = set()
+    database = Database(paths.database)
+    try:
+        for camera in CameraRepository(database).list():
+            reference = parse_credential_ref(camera.credential_ref)
+            if reference is None:
+                continue
+            try:
+                resolved = resolve_credential(reference)
+            except Exception:
+                continue
+            if resolved:
+                values.add(resolved)
+                try:
+                    decoded = json.loads(resolved)
+                except json.JSONDecodeError:
+                    continue
+                values.update(_string_values(decoded))
+    finally:
+        database.dispose()
+    return tuple(values)
+
+
+def _string_values(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        result: set[str] = set()
+        for item in value.values():
+            result.update(_string_values(item))
+        return result
+    if isinstance(value, list):
+        result = set()
+        for item in value:
+            result.update(_string_values(item))
+        return result
+    return set()
 
 
 def _run_doctor(arguments: argparse.Namespace) -> int:

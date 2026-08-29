@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import SplitResult, parse_qsl, urlsplit
 
-from ..redaction import redact_url
+from ..redaction import redact_text, redact_url, redact_value
 from .credentials import (
     credential_status,
     parse_credential_ref,
@@ -39,13 +41,13 @@ class CameraConfigurationError(ValueError):
 
 @dataclass(frozen=True)
 class CameraTestResult:
-    """Safe result from the configuration-only camera test."""
+    """Safe result from a camera configuration or source test."""
 
     status: str
     message: str
     endpoint: str
     credential: dict[str, str | bool]
-    details: dict[str, str | bool]
+    details: dict[str, object]
 
     def as_dict(self, camera: Camera) -> dict[str, object]:
         return {
@@ -54,7 +56,7 @@ class CameraTestResult:
             "message": self.message,
             "endpoint": redact_url(self.endpoint),
             "credential": self.credential,
-            "details": self.details,
+            "details": redact_value(self.details),
             "tested_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
 
@@ -212,6 +214,108 @@ def test_camera_configuration(camera: Camera) -> CameraTestResult:
             "network_test": False,
             "transport": transport,
             "stream": config.preferred_stream,
+        },
+    )
+
+
+def test_camera_connection(
+    camera: Camera,
+    *,
+    source_factory: Callable[[CameraConfig, str], Any] | None = None,
+) -> CameraTestResult:
+    """Open one source and return safe negotiated stream metadata."""
+    config = camera_config_from_record(camera)
+    reference = parse_credential_ref(config.credential_ref)
+    safe_credential = credential_status(reference)
+
+    if reference is not None:
+        try:
+            resolved = resolve_credential(reference)
+        except Exception:
+            resolved = None
+            safe_credential = {
+                "configured": True,
+                "kind": reference.kind,
+                "status": "unavailable",
+            }
+        if not resolved:
+            return CameraTestResult(
+                status="invalid",
+                message="The credential reference is configured but its value is not available.",
+                endpoint=config.endpoint,
+                credential=safe_credential,
+                details={
+                    "network_test": True,
+                    "reason": "external credential value is missing",
+                },
+            )
+
+    if "[REDACTED]" in config.endpoint and reference is None:
+        return CameraTestResult(
+            status="invalid",
+            message="The endpoint contains credentials that are not available for testing.",
+            endpoint=config.endpoint,
+            credential=safe_credential,
+            details={
+                "network_test": True,
+                "reason": "use a credential reference containing the complete RTSP endpoint",
+            },
+        )
+
+    source: Any | None = None
+    try:
+        if source_factory is None:
+            from ..capture.sources import PyAVRTSPSource
+
+            def source_factory(
+                source_config: CameraConfig,
+                camera_id: str,
+            ) -> Any:
+                return PyAVRTSPSource(source_config, camera_id=camera_id)
+
+        assert source_factory is not None
+        source = source_factory(config, camera.id)
+        info = source.open()
+    except Exception as error:
+        safe_error = redact_text(str(error))
+        return CameraTestResult(
+            status="invalid",
+            message=(
+                "Camera connection failed. Check the endpoint, credential reference, "
+                "network path, and stream name."
+            ),
+            endpoint=config.endpoint,
+            credential=safe_credential,
+            details={
+                "network_test": True,
+                "reason": "source open failed",
+                "error": safe_error,
+            },
+        )
+    finally:
+        if source is not None:
+            with suppress(Exception):
+                source.close()
+
+    resolution = None
+    if info.width is not None and info.height is not None:
+        resolution = f"{info.width}x{info.height}"
+    return CameraTestResult(
+        status="valid",
+        message="Camera configuration is valid. The source opened successfully.",
+        endpoint=config.endpoint,
+        credential=safe_credential,
+        details={
+            "network_test": True,
+            "codec": info.codec,
+            "width": info.width,
+            "height": info.height,
+            "resolution": resolution,
+            "nominal_fps": info.nominal_fps,
+            "transport": info.transport or str(config.connection_options.get("transport", "tcp")),
+            "camera_pts_available": info.has_camera_pts,
+            "has_camera_pts": info.has_camera_pts,
+            "capture_session_id": info.capture_session_id,
         },
     )
 

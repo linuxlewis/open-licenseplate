@@ -14,6 +14,22 @@ from .contracts import (
     SystemClock,
     VideoFrame,
 )
+from .fixtures import (
+    FixtureAttempt,
+    ReconnectFixture,
+    disconnect_then_recover_fixture,
+    make_preview_frame,
+)
+from .lifecycle import (
+    ActiveCameraConflict,
+    CameraRuntime,
+    CameraRuntimeStatus,
+    LifecycleState,
+    ReconnectBackoff,
+    RuntimeCounters,
+    SourceFactory,
+)
+from .preview import encode_jpeg, multipart_chunk, preview_chunks
 from .sources import (
     FakeFrameSource,
     FakeSource,
@@ -29,6 +45,9 @@ from .worker import CaptureMetrics, CaptureWorker, FrameCaptureWorker
 
 __all__ = [
     "BrokerMetrics",
+    "ActiveCameraConflict",
+    "CameraRuntime",
+    "CameraRuntimeStatus",
     "CaptureMetrics",
     "CaptureSession",
     "CaptureShutdownError",
@@ -38,7 +57,11 @@ __all__ = [
     "FakeFrameSource",
     "FrameCaptureWorker",
     "FrameSource",
+    "FixtureAttempt",
+    "LifecycleState",
     "LatestFrameBroker",
+    "ReconnectBackoff",
+    "ReconnectFixture",
     "PyAVFrameSource",
     "PyAVSource",
     "PyAVRTSPSource",
@@ -51,6 +74,13 @@ __all__ = [
     "SourceLifecycleError",
     "SourceOpenError",
     "SourceReadError",
+    "SourceFactory",
     "SystemClock",
+    "RuntimeCounters",
     "VideoFrame",
+    "disconnect_then_recover_fixture",
+    "encode_jpeg",
+    "make_preview_frame",
+    "multipart_chunk",
+    "preview_chunks",
 ]

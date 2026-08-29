@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from ..capture import ActiveCameraConflict, SourceFactory, encode_jpeg, preview_chunks
 from ..database import Database, database_status
 from ..redaction import redact_text
 from .credentials import credential_status, parse_credential_ref
@@ -17,6 +19,7 @@ from .service import (
     CameraConfigurationError,
     prepare_camera_config,
     test_camera_configuration,
+    test_camera_connection,
 )
 
 router = APIRouter(prefix="/api/v1/cameras", tags=["cameras"])
@@ -125,9 +128,144 @@ async def delete_camera(camera_id: str, request: Request) -> JSONResponse:
 
 @router.post("/{camera_id}/test")
 async def test_camera(camera_id: str, request: Request) -> JSONResponse:
-    # The test is deliberately configuration-only in this PR. Network capture
-    # belongs to the later FrameSource and preview slice.
-    return _test_camera_by_id(camera_id, request)
+    database, error = _open_database(request)
+    if error is not None:
+        return error
+    assert database is not None
+    try:
+        camera = CameraRepository(database).get(camera_id)
+        if camera is None:
+            return _error("camera was not found", status_code=404)
+        source_factory = request.app.state.camera_source_factory
+        result = await asyncio.to_thread(
+            test_camera_connection,
+            camera,
+            source_factory=source_factory,
+        )
+        return _json(result.as_dict(camera))
+    finally:
+        database.dispose()
+
+
+@router.post("/{camera_id}/start")
+async def start_camera(camera_id: str, request: Request) -> JSONResponse:
+    database, error = _open_database(request)
+    if error is not None:
+        return error
+    assert database is not None
+    try:
+        camera = CameraRepository(database).get(camera_id)
+        if camera is None:
+            return _error("camera was not found", status_code=404)
+        config = camera_config_from_record(camera)
+    finally:
+        database.dispose()
+
+    try:
+        status = request.app.state.camera_runtime.start(camera.id, config)
+    except ActiveCameraConflict as exception:
+        return _error(str(exception), status_code=409)
+    except RuntimeError as exception:
+        return _error(str(exception), status_code=409)
+    return _json(status.as_dict())
+
+
+@router.post("/{camera_id}/stop")
+async def stop_camera(camera_id: str, request: Request) -> JSONResponse:
+    database, error = _open_database(request)
+    if error is not None:
+        return error
+    assert database is not None
+    try:
+        if CameraRepository(database).get(camera_id) is None:
+            return _error("camera was not found", status_code=404)
+    finally:
+        database.dispose()
+
+    try:
+        status = await asyncio.to_thread(
+            request.app.state.camera_runtime.stop,
+            camera_id,
+        )
+    except RuntimeError as exception:
+        return _error(str(exception), status_code=409)
+    return _json(status.as_dict())
+
+
+@router.get("/{camera_id}/status")
+async def camera_status(camera_id: str, request: Request) -> JSONResponse:
+    database, error = _open_database(request)
+    if error is not None:
+        return error
+    assert database is not None
+    try:
+        if CameraRepository(database).get(camera_id) is None:
+            return _error("camera was not found", status_code=404)
+    finally:
+        database.dispose()
+    return _json(request.app.state.camera_runtime.status(camera_id).as_dict())
+
+
+@router.get("/{camera_id}/preview.mjpeg")
+async def camera_preview(camera_id: str, request: Request) -> StreamingResponse:
+    database, error = _open_database(request)
+    if error is not None:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail="database is not ready; run `open-licenseplate db upgrade` first",
+        )
+    assert database is not None
+    try:
+        if CameraRepository(database).get(camera_id) is None:
+            raise _http_error("camera was not found", 404)
+    finally:
+        database.dispose()
+
+    runtime = request.app.state.camera_runtime
+    if runtime.active_camera_id != camera_id:
+        raise _http_error(
+            "camera is not streaming; start it before opening the preview",
+            409,
+        )
+    chunks = preview_chunks(runtime.iter_preview(camera_id))
+    return StreamingResponse(
+        chunks,
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/{camera_id}/snapshot.jpg")
+async def camera_snapshot(camera_id: str, request: Request) -> Response:
+    database, error = _open_database(request)
+    if error is not None:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail="database is not ready; run `open-licenseplate db upgrade` first",
+        )
+    assert database is not None
+    try:
+        if CameraRepository(database).get(camera_id) is None:
+            raise _http_error("camera was not found", 404)
+    finally:
+        database.dispose()
+
+    runtime = request.app.state.camera_runtime
+    frame = runtime.latest_frame(camera_id)
+    if frame is None:
+        raise _http_error(
+            "no decoded frame is available; start the camera and wait for a frame",
+            409,
+        )
+    try:
+        jpeg = await asyncio.to_thread(encode_jpeg, frame)
+    except Exception:
+        raise _http_error("the current frame could not be encoded as JPEG", 503) from None
+    return Response(
+        content=jpeg,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 def _test_camera_by_id(camera_id: str, request: Request) -> JSONResponse:
@@ -150,9 +288,19 @@ def camera_payload(camera: Camera) -> dict[str, object]:
     return _camera_payload(camera)
 
 
-def camera_test_payload(camera: Camera) -> dict[str, object]:
+def camera_test_payload(
+    camera: Camera,
+    *,
+    source_factory: SourceFactory | None = None,
+    network: bool = False,
+) -> dict[str, object]:
     """Build the public test representation for HTML routes."""
-    return test_camera_configuration(camera).as_dict(camera)
+    result = (
+        test_camera_connection(camera, source_factory=source_factory)
+        if network
+        else test_camera_configuration(camera)
+    )
+    return result.as_dict(camera)
 
 
 def _camera_payload(camera: Camera) -> dict[str, object]:
@@ -273,6 +421,10 @@ def _json(payload: object, *, status_code: int = 200) -> JSONResponse:
 
 def _error(message: str, *, status_code: int) -> JSONResponse:
     return _json({"detail": redact_text(message)}, status_code=status_code)
+
+
+def _http_error(message: str, status_code: int) -> Exception:
+    return HTTPException(status_code=status_code, detail=redact_text(message))
 
 
 def _timestamp(value: Any) -> str:
