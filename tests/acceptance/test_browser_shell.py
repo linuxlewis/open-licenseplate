@@ -114,3 +114,34 @@ def test_browser_can_visit_every_page_and_use_primary_navigation(
     page.goto(f"{browser_base_url}/system", wait_until="domcontentloaded")
     assert page.locator(".primary-nav").is_visible()
     assert page.locator(".system-grid").is_visible()
+
+
+@pytest.mark.browser
+def test_browser_can_save_and_test_a_camera_without_secret_output(
+    browser_base_url: str,
+    chromium,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "CAMERA_RTSP_URL",
+        "rtsp://operator:secret-value@example.test:554/live",
+    )
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    page.goto(f"{browser_base_url}/cameras", wait_until="domcontentloaded")
+
+    page.get_by_label("Name", exact=True).fill("Front gate")
+    page.get_by_label("RTSP endpoint", exact=True).fill(
+        "rtsp://operator:secret-value@example.test:554/live"
+    )
+    page.get_by_label("Credential reference", exact=True).fill("env:CAMERA_RTSP_URL")
+    page.get_by_role("button", name="Save camera", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/cameras?notice=created")
+
+    assert page.get_by_role("heading", name="Front gate", exact=True).is_visible()
+    assert "secret-value" not in page.content()
+    assert "operator" not in page.content()
+
+    page.get_by_role("button", name="Test configuration", exact=True).click()
+    page.wait_for_url(f"{browser_base_url}/cameras?notice=test&status=valid*")
+    assert page.get_by_role("status").inner_text().startswith("Camera configuration is valid")
+    assert "secret-value" not in page.content()

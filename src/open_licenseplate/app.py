@@ -6,17 +6,23 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
+from .cameras.api import camera_test_payload
+from .cameras.api import router as camera_api_router
+from .cameras.repository import CameraRepository
+from .cameras.service import CameraConfigurationError, prepare_camera_config
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
 from .logging import configure_logging
 from .paths import ManagedPaths
+from .redaction import redact_text
 from .settings_store import SettingsStore
 from .web import STATIC_DIRECTORY, render_page
 
@@ -97,6 +103,27 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     application.state.paths = paths
     application.state.startup_complete = False
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
+    application.include_router(camera_api_router)
+
+    @application.exception_handler(RequestValidationError)
+    async def request_validation_error(
+        request: Request,
+        exception: RequestValidationError,
+    ) -> JSONResponse:
+        del request, exception
+        return JSONResponse(
+            content={"detail": "request body is invalid"},
+            status_code=422,
+        )
+
+    @application.exception_handler(HTTPException)
+    async def http_error(request: Request, exception: HTTPException) -> JSONResponse:
+        del request
+        return JSONResponse(
+            content={"detail": redact_text(str(exception.detail))},
+            status_code=exception.status_code,
+            headers=exception.headers,
+        )
 
     @application.middleware("http")
     async def add_security_headers(request: Request, call_next: Any) -> Any:
@@ -126,6 +153,79 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     @application.get("/cameras", name="cameras_page", include_in_schema=False)
     async def cameras_page(request: Request) -> Any:
         return render_page(request, effective_settings, paths, "cameras")
+
+    @application.post("/cameras", include_in_schema=False)
+    async def create_camera_from_page(request: Request) -> RedirectResponse:
+        form = _form_values(await request.body())
+        try:
+            config = prepare_camera_config(
+                name=form.get("name", ""),
+                rtsp_url=form.get("rtsp_url", ""),
+                credential_ref=form.get("credential_ref"),
+                transport=form.get("transport", "tcp"),
+                preferred_stream=form.get("preferred_stream", "main"),
+                enabled=True,
+            )
+            _create_camera(paths, config)
+        except (CameraConfigurationError, ValueError) as error:
+            return _camera_redirect("error", str(error))
+        return _camera_redirect("created")
+
+    @application.post("/cameras/{camera_id}/edit", include_in_schema=False)
+    async def update_camera_from_page(camera_id: str, request: Request) -> RedirectResponse:
+        form = _form_values(await request.body())
+        database = _ready_database(paths)
+        if database is None:
+            return _camera_redirect("database")
+        try:
+            repository = CameraRepository(database)
+            camera = repository.get(camera_id)
+            if camera is None:
+                return _camera_redirect("missing")
+            config = prepare_camera_config(
+                name=form.get("name", camera.name),
+                rtsp_url=form.get("rtsp_url") or camera.endpoint,
+                credential_ref=form.get("credential_ref") or camera.credential_ref,
+                transport=form.get("transport", "tcp"),
+                connection_options=None,
+                preferred_stream=form.get("preferred_stream", camera.preferred_stream),
+                enabled="enabled" in form,
+            )
+            repository.update(camera, config)
+        except (CameraConfigurationError, ValueError) as error:
+            return _camera_redirect("error", str(error))
+        finally:
+            database.dispose()
+        return _camera_redirect("updated")
+
+    @application.post("/cameras/{camera_id}/test", include_in_schema=False)
+    async def test_camera_from_page(camera_id: str) -> RedirectResponse:
+        database = _ready_database(paths)
+        if database is None:
+            return _camera_redirect("database")
+        try:
+            camera = CameraRepository(database).get(camera_id)
+            if camera is None:
+                return _camera_redirect("missing")
+            result = camera_test_payload(camera)
+        finally:
+            database.dispose()
+        return _camera_redirect(
+            "test",
+            str(result.get("status", "invalid")),
+            str(result.get("message", "Camera test completed.")),
+        )
+
+    @application.post("/cameras/{camera_id}/delete", include_in_schema=False)
+    async def delete_camera_from_page(camera_id: str) -> RedirectResponse:
+        database = _ready_database(paths)
+        if database is None:
+            return _camera_redirect("database")
+        try:
+            deleted = CameraRepository(database).delete(camera_id)
+        finally:
+            database.dispose()
+        return _camera_redirect("deleted" if deleted else "missing")
 
     @application.get("/models", name="models_page", include_in_schema=False)
     async def models_page(request: Request) -> Any:
@@ -174,3 +274,35 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         return JSONResponse(content=payload, status_code=status_code)
 
     return application
+
+
+def _form_values(body: bytes) -> dict[str, str]:
+    parsed = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+    return {key: values[0] for key, values in parsed.items() if values}
+
+
+def _ready_database(paths: ManagedPaths) -> Database | None:
+    if database_status(paths.database)["status"] != "ok":
+        return None
+    return Database(paths.database)
+
+
+def _create_camera(paths: ManagedPaths, config: Any) -> None:
+    database = _ready_database(paths)
+    if database is None:
+        raise CameraConfigurationError(
+            "database is not ready; run `open-licenseplate db upgrade` first"
+        )
+    try:
+        CameraRepository(database).create(config)
+    finally:
+        database.dispose()
+
+
+def _camera_redirect(kind: str, status: str = "", message: str = "") -> RedirectResponse:
+    query = f"notice={quote(redact_text(kind), safe='')}"
+    if status:
+        query += f"&status={quote(redact_text(status), safe='')}"
+    if message:
+        query += f"&message={quote(redact_text(message), safe='')}"
+    return RedirectResponse(f"/cameras?{query}", status_code=303)

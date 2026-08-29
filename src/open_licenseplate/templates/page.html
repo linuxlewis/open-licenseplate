@@ -62,7 +62,201 @@
             <span class="page-index" aria-hidden="true">M0</span>
           </div>
 
-          {% if page.key == "system" %}
+          {% if page.key == "cameras" %}
+            {% if camera_feedback %}
+              <div class="notice notice-{{ camera_feedback.tone }}" role="status">
+                {{ camera_feedback.message }}
+              </div>
+            {% endif %}
+
+            <div class="camera-layout">
+              <section class="card camera-form-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Configuration</span>
+                    <h2>Add camera</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">ADD</span>
+                </div>
+                <p class="form-note">
+                  Store a safe endpoint description and a reference such as
+                  <code>env:CAMERA_RTSP_URL</code>. The referenced value stays outside SQLite.
+                </p>
+                {% if database.status == "ok" %}
+                  <form class="camera-form" method="post" action="/cameras">
+                    <label class="field-label" for="camera-name">Name</label>
+                    <input id="camera-name" name="name" type="text" required maxlength="255">
+
+                    <label class="field-label" for="camera-url">RTSP endpoint</label>
+                    <input
+                      id="camera-url"
+                      name="rtsp_url"
+                      type="text"
+                      required
+                      maxlength="4096"
+                      placeholder="rtsp://camera.local:554/stream"
+                      autocomplete="off"
+                    >
+
+                    <label class="field-label" for="camera-credential-ref">Credential reference</label>
+                    <input
+                      id="camera-credential-ref"
+                      name="credential_ref"
+                      type="text"
+                      maxlength="255"
+                      placeholder="env:CAMERA_RTSP_URL or keychain:service/account"
+                      autocomplete="off"
+                    >
+
+                    <div class="form-row">
+                      <div>
+                        <label class="field-label" for="camera-transport">Transport</label>
+                        <select id="camera-transport" name="transport">
+                          <option value="tcp" selected>TCP (recommended)</option>
+                          <option value="udp">UDP</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="field-label" for="camera-stream">Preferred stream</label>
+                        <input id="camera-stream" name="preferred_stream" type="text" value="main" maxlength="100">
+                      </div>
+                    </div>
+                    <button class="save-button" type="submit">Save camera</button>
+                  </form>
+                {% else %}
+                  <p class="form-note">
+                    Run the database upgrade command before saving a camera profile.
+                  </p>
+                {% endif %}
+              </section>
+
+              <section class="card camera-safety-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Safety boundary</span>
+                    <h2>Secret handling</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">SAFE</span>
+                </div>
+                <dl class="detail-list">
+                  <div class="detail-row">
+                    <dt>SQLite</dt>
+                    <dd><strong>Redacted endpoint only</strong><small>No password or complete secret URL</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Environment</dt>
+                    <dd><strong>Reference by name</strong><small>The value is read only for a test</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Keychain</dt>
+                    <dd><strong>Reference by service/account</strong><small>macOS Keychain support is optional</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Network</dt>
+                    <dd><strong>Not contacted</strong><small>FrameSource is out of scope for this slice</small></dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            <section class="card card-wide camera-list-card">
+              <div class="card-heading">
+                <div>
+                  <span class="eyebrow">Saved profiles</span>
+                  <h2>{{ cameras|length }} camera{% if cameras|length != 1 %}s{% endif %}</h2>
+                </div>
+                <span class="card-icon" aria-hidden="true">LIST</span>
+              </div>
+              {% if cameras %}
+                <div class="camera-grid">
+                  {% for camera in cameras %}
+                    <article class="camera-item">
+                      <div class="camera-item-heading">
+                        <div>
+                          <span class="eyebrow">{{ "Enabled" if camera.enabled else "Disabled" }}</span>
+                          <h3>{{ camera.name }}</h3>
+                        </div>
+                        <span class="camera-state">{{ camera.credential.status|replace('_', ' ')|title }}</span>
+                      </div>
+                      <dl class="detail-list">
+                        <div class="detail-row">
+                          <dt>Endpoint</dt>
+                          <dd><code>{{ camera.endpoint }}</code></dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Credential</dt>
+                          <dd>
+                            <strong>{{ camera.credential_ref or "Not configured" }}</strong>
+                            <small>{{ camera.credential.kind|title }} reference: {{ camera.credential.status|replace('_', ' ') }}</small>
+                          </dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Stream</dt>
+                          <dd><strong>{{ camera.preferred_stream }}</strong><small>{{ camera.connection_options.transport|upper }}</small></dd>
+                        </div>
+                      </dl>
+                      <div class="camera-actions">
+                        <form method="post" action="/cameras/{{ camera.id }}/test">
+                          <button class="save-button" type="submit">Test configuration</button>
+                        </form>
+                        <form method="post" action="/cameras/{{ camera.id }}/delete">
+                          <button class="quiet-button" type="submit">Delete</button>
+                        </form>
+                      </div>
+                      <details class="camera-edit">
+                        <summary>Edit profile</summary>
+                        <form class="camera-form" method="post" action="/cameras/{{ camera.id }}/edit">
+                          <label class="field-label" for="camera-name-{{ camera.id }}">Name</label>
+                          <input id="camera-name-{{ camera.id }}" name="name" type="text" required maxlength="255" value="{{ camera.name }}">
+
+                          <label class="field-label" for="camera-url-{{ camera.id }}">Replace endpoint</label>
+                          <input
+                            id="camera-url-{{ camera.id }}"
+                            name="rtsp_url"
+                            type="text"
+                            maxlength="4096"
+                            placeholder="Leave blank to keep the saved endpoint"
+                            autocomplete="off"
+                          >
+
+                          <label class="field-label" for="camera-ref-{{ camera.id }}">Credential reference</label>
+                          <input
+                            id="camera-ref-{{ camera.id }}"
+                            name="credential_ref"
+                            type="text"
+                            maxlength="255"
+                            value="{{ camera.credential_ref or '' }}"
+                            autocomplete="off"
+                          >
+
+                          <div class="form-row">
+                            <div>
+                              <label class="field-label" for="camera-transport-{{ camera.id }}">Transport</label>
+                              <select id="camera-transport-{{ camera.id }}" name="transport">
+                                <option value="tcp" {% if camera.connection_options.transport == "tcp" %}selected{% endif %}>TCP</option>
+                                <option value="udp" {% if camera.connection_options.transport == "udp" %}selected{% endif %}>UDP</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label class="field-label" for="camera-stream-{{ camera.id }}">Preferred stream</label>
+                              <input id="camera-stream-{{ camera.id }}" name="preferred_stream" type="text" value="{{ camera.preferred_stream }}" maxlength="100">
+                            </div>
+                          </div>
+                          <label class="check-field">
+                            <input name="enabled" type="checkbox" {% if camera.enabled %}checked{% endif %}>
+                            Enabled
+                          </label>
+                          <button class="save-button" type="submit">Save changes</button>
+                        </form>
+                      </details>
+                    </article>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <p class="form-note">No saved camera profiles yet.</p>
+              {% endif %}
+            </section>
+          {% elif page.key == "system" %}
             <div class="system-grid">
               <section class="card card-wide">
                 <div class="card-heading">

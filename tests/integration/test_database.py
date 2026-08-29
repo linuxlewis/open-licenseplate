@@ -31,18 +31,33 @@ def test_fresh_database_migration_creates_settings_table(tmp_path: Path) -> None
                     text(
                         "SELECT name FROM sqlite_master "
                         "WHERE type = 'table' AND name IN "
-                        "('alembic_version', 'application_settings')"
+                        "('alembic_version', 'application_settings', 'cameras')"
                     )
                 )
+            }
+            camera_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(cameras)"))
             }
     finally:
         database.dispose()
 
-    assert tables == {"alembic_version", "application_settings"}
+    assert tables == {"alembic_version", "application_settings", "cameras"}
+    assert camera_columns == {
+        "id",
+        "name",
+        "endpoint",
+        "credential_ref",
+        "connection_options_json",
+        "preferred_stream",
+        "region_of_interest_json",
+        "enabled",
+        "created_at",
+        "updated_at",
+    }
 
     # An already current database must accept a second upgrade.
     upgrade_database(database_path)
-    assert database_status(database_path)["current_revision"] == "0001_initial"
+    assert database_status(database_path)["current_revision"] == "0002_cameras"
 
 
 def test_database_status_discovers_head_from_alembic_for_missing_database(
