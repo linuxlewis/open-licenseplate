@@ -49,3 +49,20 @@ def test_non_loopback_binding_requires_explicit_unsafe_flag(
         load_settings(
             cli_overrides={"server.host": "0.0.0.0"},
         )
+
+
+def test_ui_density_is_typed_and_accepts_environment_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPEN_LICENSEPLATE_STORAGE__DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("OPEN_LICENSEPLATE_UI__DENSITY", "compact")
+
+    settings = load_settings()
+
+    assert settings.ui.density == "compact"
+    assert settings.sources["ui.density"] == "environment"
+
+    monkeypatch.setenv("OPEN_LICENSEPLATE_UI__DENSITY", "spacious")
+    with pytest.raises(ValidationError):
+        load_settings()

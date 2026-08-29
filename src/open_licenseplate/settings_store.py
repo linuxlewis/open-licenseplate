@@ -21,6 +21,7 @@ PERSISTABLE_SETTING_KEYS = frozenset(
         "log_level",
         "server.host",
         "server.port",
+        "ui.density",
     }
 )
 """Settings that are safe and stable enough for generic persistence.
@@ -78,14 +79,20 @@ def validate_setting_key(setting_key: str) -> str:
 def _validate_value(setting_key: str, value: Any) -> str:
     if _contains_secret_key(value):
         raise ValueError("secret values cannot be persisted")
-    if setting_key in {"app_name", "environment", "log_level", "server.host"} and not isinstance(
-        value, str
-    ):
+    if setting_key in {
+        "app_name",
+        "environment",
+        "log_level",
+        "server.host",
+        "ui.density",
+    } and not isinstance(value, str):
         raise ValueError(f"{setting_key} must be a string")
     if setting_key == "server.port" and (
         isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535
     ):
         raise ValueError("server.port must be an integer from 1 through 65535")
+    if setting_key == "ui.density" and value not in {"comfortable", "compact"}:
+        raise ValueError("ui.density must be comfortable or compact")
     try:
         return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError) as error:
