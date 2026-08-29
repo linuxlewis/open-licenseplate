@@ -412,5 +412,7 @@ class StillImageDetector(Protocol):
         image: StillImage,
         model: ModelDescriptor,
         options: BackendOptions | None = None,
+        *,
+        confidence_threshold: float | None = None,
     ) -> DetectionBatch:
         """Run preprocessing, prediction, decoding, and validation."""

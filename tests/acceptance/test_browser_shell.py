@@ -6,8 +6,10 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
+import numpy as np
 import pytest
 import uvicorn
 
@@ -16,6 +18,7 @@ from open_licenseplate.app import create_app
 from open_licenseplate.capture import FixtureAttempt, ReconnectFixture, make_preview_frame
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import upgrade_database
+from open_licenseplate.inference.backends import FakeBackend
 
 
 def _free_port() -> int:
@@ -88,6 +91,61 @@ def chromium():
         )
         yield browser
         browser.close()
+
+
+@pytest.fixture
+def fake_browser_base_url(tmp_path: Path) -> Iterator[str]:
+    settings = load_settings(
+        cli_overrides={
+            "storage.data_dir": tmp_path / "data",
+            "storage.log_dir": tmp_path / "logs",
+        }
+    )
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+
+    def outputs(prepared: Any) -> dict[str, Any]:
+        region = np.asarray(prepared.value)[280:360, 160:480]
+        if float(region.mean()) < 100:
+            return {
+                "coordinates": np.empty((0, 4), dtype=np.float32),
+                "confidence": np.empty((0,), dtype=np.float32),
+            }
+        return {
+            "coordinates": np.array([[160, 280, 480, 360]], dtype=np.float32),
+            "confidence": np.array([0.9], dtype=np.float32),
+        }
+
+    backend = FakeBackend(output_factory=outputs)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(settings, inference_backend_factory=lambda: backend),
+            host="127.0.0.1",
+            port=_free_port(),
+            log_config=None,
+            access_log=False,
+        )
+    )
+    server.install_signal_handlers = lambda: None
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.config.port}"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.get(f"{base_url}/live", timeout=0.5)
+            if response.status_code == 200:
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.05)
+    else:
+        server.should_exit = True
+        thread.join(timeout=5)
+        raise RuntimeError("fake browser test server did not start")
+
+    yield base_url
+    server.should_exit = True
+    thread.join(timeout=5)
 
 
 @pytest.mark.browser
@@ -201,3 +259,75 @@ def test_browser_can_import_and_manage_a_model_package(
     page.get_by_role("button", name="Delete", exact=True).click()
     page.wait_for_url(f"{browser_base_url}/models?notice=deleted")
     assert page.get_by_text("No managed model packages yet.").is_visible()
+
+
+@pytest.mark.browser
+@pytest.mark.m2_acceptance
+def test_browser_can_validate_and_detect_plate_and_no_plate_images(
+    fake_browser_base_url: str,
+    chromium,
+    tmp_path: Path,
+) -> None:
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        tmp_path,
+        model_id="browser-still-model",
+    )
+    fixture_root = Path(__file__).parents[1] / "fixtures" / "still"
+    page = chromium.new_page(viewport={"width": 1280, "height": 1000})
+    page.goto(f"{fake_browser_base_url}/models", wait_until="domcontentloaded")
+
+    page.locator("#model-manifest").set_input_files(str(manifest_path))
+    page.locator("#model-archive").set_input_files(str(archive_path))
+    page.get_by_role("button", name="Import model", exact=True).click()
+    page.wait_for_url(f"{fake_browser_base_url}/models?notice=imported")
+
+    page.get_by_role("button", name="Validate package", exact=True).click()
+    page.wait_for_url(f"{fake_browser_base_url}/models?notice=validated")
+    page.get_by_text("Inspect runtime validation", exact=True).click()
+    assert page.get_by_text("coordinates", exact=True).is_visible()
+    assert page.get_by_text("confidence", exact=True).is_visible()
+    page.locator("#model-image-browser-still-model").set_input_files(
+        str(fixture_root / "plate.png")
+    )
+    page.get_by_role("button", name="Detect image", exact=True).click()
+    page.get_by_text(
+        "Detection complete. The displayed boxes use source-image pixels.",
+        exact=True,
+    ).wait_for()
+
+    assert (
+        page.locator("[data-detection-image]")
+        .get_attribute("src")
+        .startswith("data:image/png;base64,")
+    )
+    assert page.get_by_text("license_plate 90.0%", exact=True).is_visible()
+    assert (
+        page.locator('[data-metric="model_checksum"]').inner_text() == _manifest["artifact_sha256"]
+    )
+    assert page.locator('[data-metric="preprocessing_ms"]').inner_text().endswith(" ms")
+    assert page.locator('[data-metric="inference_ms"]').inner_text().endswith(" ms")
+    assert page.locator('[data-metric="postprocessing_ms"]').inner_text().endswith(" ms")
+    assert page.locator('[data-metric="total_ms"]').inner_text().endswith(" ms")
+
+    page.locator("#model-image-browser-still-model").set_input_files(
+        str(fixture_root / "no-plate.png")
+    )
+    page.get_by_role("button", name="Detect image", exact=True).click()
+    page.get_by_text(
+        "Detection complete. The displayed boxes use source-image pixels.",
+        exact=True,
+    ).wait_for()
+    assert page.locator('[data-metric="detections"]').inner_text() == "0"
+    assert not page.get_by_text("license_plate 90.0%", exact=True).is_visible()
+
+    page.locator("#model-compute-browser-still-model").select_option("cpu_only")
+    page.locator("#model-image-browser-still-model").set_input_files(
+        str(fixture_root / "plate.png")
+    )
+    page.get_by_role("button", name="Detect image", exact=True).click()
+    page.get_by_text(
+        "Detection complete. The model reloaded for the new compute units.",
+        exact=True,
+    ).wait_for()
+    assert page.locator('[data-metric="compute_units"]').inner_text() == "CPU only"
+    assert page.locator('[data-metric="detections"]').inner_text() == "1"

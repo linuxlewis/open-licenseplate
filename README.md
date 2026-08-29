@@ -111,9 +111,19 @@ prediction. It records safe inspection and prediction details before it marks
 the model `runtime_valid`. On other platforms, Core ML validation remains
 pending and the portable fake backend is available for tests.
 
-The browser workflow is available at `/models`. The JSON registry API uses
-`/api/v1/models` with import, read, package validation, activation,
-deactivation, and safe deletion operations.
+The browser workflow is available at `/models`. After runtime validation, each
+model has a bounded still-image form. It accepts JPEG and PNG only, returns the
+exact submitted bytes for display, maps boxes to source-image pixels, and
+shows labels, confidence, checksum, compute units, and stage timings. A
+compute-unit change reloads the managed detector session. The JSON registry API
+uses `/api/v1/models` with import, read, package validation, still-image
+detection, activation, deactivation, and safe deletion operations.
+
+The still-image endpoint rejects malformed, unsupported, oversized, and unsafe
+decompression data. Image decoding and detector inference run in a worker
+thread, not in the FastAPI event loop. The fake backend and deterministic plate
+fixtures support portable acceptance tests. See `docs/m2-acceptance.md` for
+the automated commands and human checklist.
 
 Audit managed files for unredacted secret patterns with:
 

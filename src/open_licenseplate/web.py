@@ -106,11 +106,14 @@ PAGES = (
         path="/models",
         eyebrow="Inference",
         title="Detection models",
-        description="Manage imported detector packages, adapters, and provenance.",
+        description=(
+            "Validate detector packages, run bounded still-image checks, and inspect "
+            "source-pixel boxes and timing."
+        ),
         empty_title="No models imported",
         empty_description=(
             "Import a model package to inspect its manifest and provenance. "
-            "This slice does not load or execute a model."
+            "Run runtime validation before using the still-image workflow."
         ),
         planned_milestone="M2 and M7",
     ),
