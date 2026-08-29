@@ -1364,6 +1364,24 @@ code {
   margin-top: 18px;
 }
 
+.live-actions-secondary {
+  margin-top: 10px;
+}
+
+.live-threshold-value {
+  align-self: end;
+  min-width: 40px;
+  padding-bottom: 8px;
+  color: var(--teal);
+  font-size: 20px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.live-overlay-toggle {
+  margin-top: 14px;
+}
+
 .live-actions button {
   flex: 1;
 }
@@ -1410,6 +1428,51 @@ code {
 
 #live-preview[hidden] {
   display: none;
+}
+
+.live-processed-preview-card {
+  grid-column: 1 / -1;
+}
+
+.processed-stage {
+  display: grid;
+  min-height: 310px;
+  overflow: hidden;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-medium);
+  background:
+    linear-gradient(135deg, rgba(245, 202, 104, 0.11), transparent 48%),
+    #1b292d;
+}
+
+.processed-frame {
+  position: relative;
+  width: 100%;
+  line-height: 0;
+}
+
+.processed-frame[hidden] {
+  display: none;
+}
+
+#live-processed-preview {
+  display: block;
+  width: 100%;
+  max-height: 520px;
+  object-fit: contain;
+}
+
+#live-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.live-processed-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .preview-empty {
@@ -1477,10 +1540,15 @@ code {
   .live-layout {
     grid-template-columns: 1fr;
   }
+
+  .live-processed-preview-card {
+    grid-column: 1;
+  }
 }
 
 @media (max-width: 560px) {
-  .live-metadata {
+  .live-metadata,
+  .live-processed-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

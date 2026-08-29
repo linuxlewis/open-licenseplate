@@ -7,6 +7,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal
@@ -34,6 +35,12 @@ from ..inference import (
     ModelDescriptor,
     PreprocessingError,
     StillImage,
+)
+from .display import (
+    DisplayShutdownError,
+    ProcessedDisplayService,
+    ProcessedDisplaySubscription,
+    build_display_candidate,
 )
 
 PipelineState = Literal["stopped", "starting", "warming", "running", "stopping", "failed"]
@@ -125,9 +132,12 @@ class LivePipelineMetrics:
     prediction_ms: float | None = None
     postprocessing_ms: float | None = None
     end_to_end_ms: float | None = None
+    prediction_p50_ms: float | None = None
+    prediction_p95_ms: float | None = None
     processed_fps: float = 0.0
     source_replacement_count: int = 0
     inference_replacement_count: int = 0
+    display_replacement_count: int = 0
     stale_frame_count: int = 0
     rejected_candidates: int = 0
     failure_count: int = 0
@@ -144,11 +154,15 @@ class LivePipelineMetrics:
             "prediction_ms": _safe_float(self.prediction_ms),
             "postprocessing_ms": _safe_float(self.postprocessing_ms),
             "end_to_end_ms": _safe_float(self.end_to_end_ms),
+            "prediction_p50_ms": _safe_float(self.prediction_p50_ms),
+            "prediction_p95_ms": _safe_float(self.prediction_p95_ms),
             "processed_fps": round(max(0.0, self.processed_fps), 3),
             "source_replacement_count": self.source_replacement_count,
             "inference_replacement_count": self.inference_replacement_count,
+            "display_replacement_count": self.display_replacement_count,
             "source_replaced_frames": self.source_replacement_count,
             "inference_replaced_frames": self.inference_replacement_count,
+            "display_replaced_frames": self.display_replacement_count,
             "stale_frame_count": self.stale_frame_count,
             "rejected_candidates": self.rejected_candidates,
             "failure_count": self.failure_count,
@@ -204,6 +218,7 @@ class LivePipelineStatus:
     state: PipelineState
     camera_id: str | None
     model_id: str | None
+    generation_number: int | None
     model_checksum: str | None
     capture_session_id: str | None
     epoch: str | None
@@ -232,6 +247,7 @@ class LivePipelineStatus:
             "lifecycle_state": self.state,
             "camera_id": self.camera_id,
             "model_id": self.model_id,
+            "generation_number": self.generation_number,
             "model_checksum": self.model_checksum,
             "capture_session_id": self.capture_session_id,
             "epoch": self.epoch,
@@ -280,6 +296,7 @@ class LivePipelineCoordinator:
     poll_interval_seconds: float = 0.02
     stop_timeout_seconds: float = 5.0
     epoch_factory: EpochFactory = lambda: uuid4().hex
+    display_max_fps: float = 10.0
 
     def __post_init__(self) -> None:
         if self.poll_interval_seconds <= 0:
@@ -287,6 +304,7 @@ class LivePipelineCoordinator:
         if self.stop_timeout_seconds <= 0:
             raise ValueError("stop_timeout_seconds must be positive")
         self._condition = threading.Condition()
+        self._control_lock = threading.RLock()
         self._state: PipelineState = "stopped"
         self._state_history: deque[PipelineState] = deque(["stopped"], maxlen=32)
         self._generation_number = 0
@@ -301,6 +319,11 @@ class LivePipelineCoordinator:
         self._failure: LivePipelineFailure | None = None
         self._metrics = LivePipelineMetrics()
         self._completed_at: deque[float] = deque(maxlen=120)
+        self._prediction_samples_ms: deque[float] = deque(maxlen=120)
+        self._display = ProcessedDisplayService(
+            max_fps=self.display_max_fps,
+            on_error=self._display_failed,
+        )
 
     @property
     def state(self) -> PipelineState:
@@ -327,6 +350,27 @@ class LivePipelineCoordinator:
             return None if self._generation is None else self._generation.descriptor.model_id
 
     def start(
+        self,
+        camera_id: str,
+        camera: CameraConfig,
+        model: ModelDescriptor,
+        *,
+        threshold: float | None = None,
+        options: BackendOptions | None = None,
+        region_of_interest: SourcePixelRegionOfInterest | None = None,
+    ) -> LivePipelineStatus:
+        """Start one camera/model generation under one control lock."""
+        with self._control_lock:
+            return self._start(
+                camera_id,
+                camera,
+                model,
+                threshold=threshold,
+                options=options,
+                region_of_interest=region_of_interest,
+            )
+
+    def _start(
         self,
         camera_id: str,
         camera: CameraConfig,
@@ -400,22 +444,33 @@ class LivePipelineCoordinator:
             self._failure = None
             self._metrics = LivePipelineMetrics()
             self._completed_at.clear()
+            self._prediction_samples_ms.clear()
             self._state_history = deque(["stopped"], maxlen=32)
             self._transition_locked("starting")
-            try:
-                self.camera_runtime.start(camera_id, camera)
-            except Exception:
-                self._generation = None
-                self._transition_locked("stopped")
-                raise
-            self._thread = threading.Thread(
+        try:
+            self._display.start_generation(generation.number)
+            self.camera_runtime.start(camera_id, camera)
+            thread = threading.Thread(
                 target=self._run,
                 args=(generation,),
                 name="open-licenseplate-live-inference",
                 daemon=True,
             )
-            self._thread.start()
-            return self._status_locked()
+            with self._condition:
+                if not self._is_current_locked(generation) or self._state != "starting":
+                    raise LivePipelineError("live pipeline start was cancelled")
+                self._thread = thread
+                thread.start()
+                return self._status_locked()
+        except Exception:
+            self._stop_display(reason="failed")
+            with suppress(Exception):
+                self.camera_runtime.stop(camera_id, timeout=self.stop_timeout_seconds)
+            with self._condition:
+                if self._is_current_locked(generation):
+                    self._generation = None
+                    self._transition_locked("stopped")
+            raise
 
     def update_threshold(self, threshold: float) -> LivePipelineStatus:
         """Update confidence filtering without reloading the model."""
@@ -428,6 +483,16 @@ class LivePipelineCoordinator:
             return self._status_locked()
 
     def stop(self, *, timeout: float | None = None) -> LivePipelineStatus:
+        """Stop one live generation under one control lock."""
+        with self._control_lock:
+            return self._stop(timeout=timeout)
+
+    def _stop(
+        self,
+        *,
+        timeout: float | None = None,
+        skip_display: bool = False,
+    ) -> LivePipelineStatus:
         """Stop inference, then capture, within one bounded deadline."""
         wait_timeout = self.stop_timeout_seconds if timeout is None else max(0.0, timeout)
         started = time.monotonic()
@@ -446,12 +511,18 @@ class LivePipelineCoordinator:
                 subscription = self._subscription
                 result = None
         if result is not None:
-            if generation is not None and not self._stop_camera(
+            display_ok = skip_display or self._stop_display(reason="stopped")
+            camera_ok = generation is None or self._stop_camera(
                 generation.camera_id,
                 wait_timeout,
-            ):
+            )
+            if not camera_ok:
                 self._record_stop_failure()
                 raise LivePipelineShutdownError("camera resources did not stop before the deadline")
+            if not display_ok:
+                raise LivePipelineShutdownError(
+                    "processed display resources did not stop before the deadline"
+                )
             return result
 
         if subscription is not None:
@@ -461,6 +532,8 @@ class LivePipelineCoordinator:
         elapsed = time.monotonic() - started
         remaining = max(0.0, wait_timeout - elapsed)
         if thread.is_alive():
+            if not skip_display:
+                self._stop_display(reason="failed")
             with self._condition:
                 self._record_failure_locked(
                     LivePipelineFailure(
@@ -476,20 +549,36 @@ class LivePipelineCoordinator:
             generation.camera_id,
             remaining,
         ):
+            if not skip_display:
+                self._stop_display(reason="failed")
             self._record_stop_failure()
             raise LivePipelineShutdownError("camera resources did not stop before the deadline")
         with self._condition:
             if self._state == "stopping":
                 self._transition_locked("stopped")
+        display_ok = skip_display or self._stop_display(reason="stopped")
+        if not display_ok:
+            raise LivePipelineShutdownError(
+                "processed display resources did not stop before the deadline"
+            )
+        with self._condition:
             return self._status_locked()
 
     def close(self) -> None:
         """Release the live pipeline during application shutdown."""
-        try:
-            self.stop()
-        except LivePipelineShutdownError:
-            # The daemon worker keeps ownership until its current prediction ends.
-            return
+        with self._control_lock:
+            self._stop_display(reason="shutdown")
+            try:
+                self._stop(skip_display=True)
+            except LivePipelineShutdownError:
+                # The daemon worker keeps ownership until its current prediction ends.
+                pass
+            finally:
+                self._stop_display(reason="shutdown")
+
+    def subscribe_display(self) -> ProcessedDisplaySubscription | None:
+        """Return a capacity-one processed display subscription."""
+        return self._display.subscribe()
 
     def status(self) -> LivePipelineStatus:
         """Return a safe immutable state snapshot."""
@@ -567,6 +656,11 @@ class LivePipelineCoordinator:
                             if self._capture_session_id != frame.capture_session_id:
                                 self._capture_session_id = frame.capture_session_id
                                 self._epoch = self.epoch_factory()
+                                self._display.set_provenance(
+                                    generation.number,
+                                    self._epoch,
+                                    frame.capture_session_id,
+                                )
                             self._frame_sequence = None
                 if last_sequence is not None and frame.sequence <= last_sequence:
                     with self._condition:
@@ -603,6 +697,7 @@ class LivePipelineCoordinator:
                     crop_ms=crop_ms,
                     completed_monotonic=completed_monotonic,
                     subscription=subscription,
+                    threshold=threshold,
                 )
         except _WorkerFailure as error:
             failed = True
@@ -665,6 +760,7 @@ class LivePipelineCoordinator:
         crop_ms: float,
         completed_monotonic: float,
         subscription: LatestFrameSubscription,
+        threshold: float,
     ) -> None:
         capture_age_ms = max(
             0.0,
@@ -678,7 +774,7 @@ class LivePipelineCoordinator:
         with self._condition:
             if not self._is_current_locked(generation):
                 return
-            session_id = self._capture_session_id or frame.capture_session_id
+            session_id = frame.capture_session_id
             epoch = self._epoch or self.epoch_factory()
             self._capture_session_id = session_id
             self._epoch = epoch
@@ -697,6 +793,9 @@ class LivePipelineCoordinator:
             )
             self._frame_sequence = frame.sequence
             self._last_result = result
+            self._prediction_samples_ms.append(_nonnegative(run.inference_ms))
+            prediction_p50_ms = _percentile(self._prediction_samples_ms, 0.50)
+            prediction_p95_ms = _percentile(self._prediction_samples_ms, 0.95)
             self._metrics = replace(
                 self._metrics,
                 captured_frames=_metric_delta(
@@ -710,6 +809,8 @@ class LivePipelineCoordinator:
                 prediction_ms=_nonnegative(run.inference_ms),
                 postprocessing_ms=_nonnegative(run.postprocessing_ms),
                 end_to_end_ms=capture_age_ms,
+                prediction_p50_ms=prediction_p50_ms,
+                prediction_p95_ms=prediction_p95_ms,
                 processed_fps=processed_fps,
                 source_replacement_count=_metric_delta(
                     source_metrics,
@@ -719,6 +820,29 @@ class LivePipelineCoordinator:
                 inference_replacement_count=inference_metrics.replaced_frames,
                 rejected_candidates=detections.rejected_count,
             )
+            display_metrics = self._display.metrics()
+            self._metrics = replace(
+                self._metrics,
+                display_replacement_count=display_metrics.replaced_units,
+            )
+            candidate = build_display_candidate(
+                generation_number=generation.number,
+                frame=frame,
+                camera_id=result.camera_id,
+                model_id=result.model_id,
+                model_checksum=result.model_checksum,
+                capture_session_id=result.capture_session_id,
+                stream_epoch=result.stream_epoch,
+                detections=result.detections,
+                threshold=threshold,
+                region_of_interest=(
+                    None
+                    if generation.region_of_interest is None
+                    else generation.region_of_interest.as_dict()
+                ),
+                metrics=self._metrics.as_dict(),
+            )
+        self._display.submit(candidate)
 
     def _frame_matches_camera(self, generation: _PipelineGeneration, frame: VideoFrame) -> bool:
         camera_status = self.camera_runtime.status(generation.camera_id)
@@ -744,17 +868,59 @@ class LivePipelineCoordinator:
             )
             self._transition_locked("failed")
 
+    def _stop_display(self, *, reason: str) -> bool:
+        try:
+            self._display.stop_generation(
+                reason=reason,
+                timeout=self.stop_timeout_seconds,
+            )
+        except DisplayShutdownError:
+            self._record_display_shutdown_failure()
+            return False
+        return True
+
+    def _record_display_shutdown_failure(self) -> None:
+        with self._condition:
+            self._record_failure_locked(
+                LivePipelineFailure(
+                    "shutdown",
+                    "processed display encoder did not stop before the deadline",
+                )
+            )
+            self._transition_locked("failed")
+
     def _set_state(self, generation: _PipelineGeneration, state: PipelineState) -> None:
         with self._condition:
             if self._is_current_locked(generation) and self._state not in {"stopping", "failed"}:
                 self._transition_locked(state)
 
-    def _fail(self, generation: _PipelineGeneration, failure: LivePipelineFailure) -> None:
+    def _fail(self, generation: _PipelineGeneration, failure: LivePipelineFailure) -> bool:
+        should_close_display = False
         with self._condition:
             if not self._is_current_locked(generation) or generation.stop_requested.is_set():
-                return
+                return False
             self._record_failure_locked(failure)
             self._transition_locked("failed")
+            should_close_display = True
+        if should_close_display:
+            self._stop_display(reason="failed")
+        return True
+
+    def _display_failed(self) -> None:
+        """Fail the active pipeline when processed JPEG encoding is unsafe."""
+        with self._condition:
+            generation = self._generation
+        if generation is not None:
+            applied = self._fail(
+                generation,
+                LivePipelineFailure(
+                    "display",
+                    "processed preview encoding failed; live detection stopped",
+                ),
+            )
+            if applied:
+                generation.stop_requested.set()
+                self._stop_camera(generation.camera_id, self.stop_timeout_seconds)
 
     def _record_failure_locked(self, failure: LivePipelineFailure) -> None:
         self._failure = failure
@@ -804,11 +970,16 @@ class LivePipelineCoordinator:
                     metrics.inference_replacement_count,
                     0 if inference_metrics is None else inference_metrics.replaced_frames,
                 ),
+                display_replacement_count=max(
+                    metrics.display_replacement_count,
+                    self._display.metrics().replaced_units,
+                ),
             )
         return LivePipelineStatus(
             state=self._state,
             camera_id=camera_id,
             model_id=None if generation is None else generation.descriptor.model_id,
+            generation_number=None if generation is None else generation.number,
             model_checksum=self._model_checksum,
             capture_session_id=self._capture_session_id,
             epoch=self._epoch,
@@ -983,6 +1154,15 @@ def _processed_fps(completed_at: deque[float]) -> float:
     if elapsed <= 0:
         return 0.0
     return (len(completed_at) - 1) / elapsed
+
+
+def _percentile(values: deque[float], percentile: float) -> float | None:
+    """Return one bounded nearest-rank percentile."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(math.ceil(percentile * len(ordered))) - 1))
+    return _safe_float(ordered[index])
 
 
 def _detection_payload(detection: Detection) -> dict[str, Any]:

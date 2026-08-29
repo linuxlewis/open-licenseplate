@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, cast
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from ..cameras.repository import CameraConfig, CameraRepository, camera_config_from_record
@@ -23,6 +23,12 @@ from ..models.repository import (
 )
 from ..models.service import RUNTIME_VALID
 from ..paths import ManagedPaths
+from .display import (
+    LIVE_PROTOCOL_VERSION,
+    DisplayMessageTooLarge,
+    DisplayProtocolError,
+    validate_display_unit,
+)
 from .pipeline import (
     LivePipelineConflict,
     LivePipelineError,
@@ -119,6 +125,130 @@ async def stop_live(request: Request) -> JSONResponse:
         return _error(str(error), status_code=409)
     except LivePipelineError as error:
         return _error(str(error), status_code=409)
+
+
+@router.websocket("/ws")
+async def live_websocket(websocket: WebSocket) -> None:
+    """Send ordered JSON/JPEG display units for the active live generation."""
+    await websocket.accept()
+    pipeline = websocket.app.state.live_pipeline
+    initial_status = await asyncio.to_thread(pipeline.status)
+    try:
+        subscription = pipeline.subscribe_display()
+    except DisplayProtocolError:
+        await _send_state_and_close(websocket, "failed", code=1013)
+        return
+    if subscription is None:
+        if initial_status.state == "failed":
+            await _send_state_and_close(
+                websocket,
+                "failed",
+                code=1011,
+                failure=initial_status.failure,
+            )
+        elif initial_status.state in {"stopping", "stopped"}:
+            await _send_state_and_close(websocket, initial_status.state, code=1000)
+        else:
+            await _send_state_and_close(websocket, "stopped", code=1000)
+        return
+
+    last_epoch: str | None = None
+    last_sequence = -1
+    try:
+        while True:
+            if subscription.closed:
+                reason = subscription.close_reason or "failed"
+                if reason == "shutdown":
+                    await _send_state_and_close(websocket, "shutdown", code=1001)
+                elif reason == "stopped":
+                    await _send_state_and_close(websocket, "stopped", code=1000)
+                else:
+                    await _send_state_and_close(websocket, "failed", code=1011)
+                return
+            status = await asyncio.to_thread(pipeline.status)
+            if status.state in {"stopped", "stopping"}:
+                await _send_state_and_close(websocket, status.state, code=1000)
+                return
+            if status.state == "failed":
+                await _send_state_and_close(websocket, "failed", code=1011, failure=status.failure)
+                return
+
+            unit = await asyncio.to_thread(subscription.get, 0.5)
+            if unit is None:
+                if subscription.closed:
+                    reason = subscription.close_reason or "failed"
+                    if reason == "shutdown":
+                        await _send_state_and_close(websocket, "shutdown", code=1001)
+                    elif reason == "stopped":
+                        await _send_state_and_close(websocket, "stopped", code=1000)
+                    else:
+                        await _send_state_and_close(websocket, "failed", code=1011)
+                    return
+                continue
+
+            try:
+                await asyncio.to_thread(validate_display_unit, unit)
+            except DisplayMessageTooLarge:
+                await _send_state_and_close(websocket, "failed", code=1009)
+                return
+            except DisplayProtocolError:
+                await _send_state_and_close(websocket, "failed", code=1008)
+                return
+
+            current_status = await asyncio.to_thread(pipeline.status)
+            if current_status.state in {"stopped", "stopping"}:
+                await _send_state_and_close(websocket, current_status.state, code=1000)
+                return
+            if current_status.state == "failed":
+                await _send_state_and_close(
+                    websocket,
+                    "failed",
+                    code=1011,
+                    failure=current_status.failure,
+                )
+                return
+            if current_status.state != "running":
+                continue
+            if (
+                current_status.generation_number != unit.generation_number
+                or current_status.stream_epoch != unit.stream_epoch
+                or current_status.capture_session_id != unit.capture_session_id
+            ):
+                continue
+            if last_epoch != unit.stream_epoch:
+                last_epoch = unit.stream_epoch
+                last_sequence = -1
+            if unit.frame_sequence <= last_sequence:
+                continue
+            await websocket.send_text(unit.metadata_text)
+            await websocket.send_bytes(unit.jpeg)
+            last_sequence = unit.frame_sequence
+    except (WebSocketDisconnect, RuntimeError, ConnectionError):
+        return
+    finally:
+        subscription.close()
+
+
+async def _send_state_and_close(
+    websocket: WebSocket,
+    state: str,
+    *,
+    code: int,
+    failure: Any = None,
+) -> None:
+    """Send a safe terminal state before closing a live display socket."""
+    payload: dict[str, Any] = {
+        "type": "state",
+        "protocol_version": LIVE_PROTOCOL_VERSION,
+        "state": state,
+    }
+    if failure is not None:
+        payload["failure"] = failure.as_dict()
+    try:
+        await websocket.send_json(payload)
+        await websocket.close(code=code)
+    except (WebSocketDisconnect, RuntimeError, ConnectionError):
+        return
 
 
 def _load_resources(
@@ -236,5 +366,6 @@ __all__ = [
     "LiveResourceError",
     "LiveResourceNotFound",
     "LiveResources",
+    "live_websocket",
     "router",
 ]

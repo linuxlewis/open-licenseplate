@@ -1,5 +1,23 @@
 """Live capture and inference coordination contracts."""
 
+from .display import (
+    LIVE_PROTOCOL_VERSION,
+    MAX_RETIRED_PROVENANCES,
+    DisplayBrokerMetrics,
+    DisplayMessageTooLarge,
+    DisplayProtocolError,
+    DisplayShutdownError,
+    ProcessedDisplayBroker,
+    ProcessedDisplayCandidate,
+    ProcessedDisplayEncoder,
+    ProcessedDisplayService,
+    ProcessedDisplaySubscription,
+    ProcessedDisplayUnit,
+    build_display_candidate,
+    build_display_unit,
+    jpeg_dimensions,
+    validate_display_unit,
+)
 from .pipeline import (
     BackendFactory,
     EpochFactory,
@@ -17,7 +35,13 @@ from .pipeline import (
 
 __all__ = [
     "BackendFactory",
+    "DisplayBrokerMetrics",
+    "DisplayMessageTooLarge",
+    "DisplayProtocolError",
+    "DisplayShutdownError",
     "EpochFactory",
+    "LIVE_PROTOCOL_VERSION",
+    "MAX_RETIRED_PROVENANCES",
     "LiveFrameResult",
     "LivePipelineConflict",
     "LivePipelineCoordinator",
@@ -27,5 +51,15 @@ __all__ = [
     "LivePipelineShutdownError",
     "LivePipelineStatus",
     "PipelineState",
+    "ProcessedDisplayBroker",
+    "ProcessedDisplayCandidate",
+    "ProcessedDisplayEncoder",
+    "ProcessedDisplayService",
+    "ProcessedDisplaySubscription",
+    "ProcessedDisplayUnit",
     "SourcePixelRegionOfInterest",
+    "build_display_candidate",
+    "build_display_unit",
+    "jpeg_dimensions",
+    "validate_display_unit",
 ]

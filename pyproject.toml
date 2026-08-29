@@ -23,6 +23,7 @@ dependencies = [
     "Pillow>=11,<13",
     "sqlalchemy>=2.0,<3",
     "uvicorn>=0.32,<1",
+    "websockets>=13,<16",
     "PyYAML>=6.0,<7",
 ]
 

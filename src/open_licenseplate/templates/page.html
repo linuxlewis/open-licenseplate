@@ -64,7 +64,7 @@
               <h1>{{ page.title }}</h1>
               <p class="lede">{{ page.description }}</p>
             </div>
-            <span class="page-index" aria-hidden="true">{{ "M2" if page.key == "models" else ("M1" if page.key in ["live", "cameras"] else "M0") }}</span>
+            <span class="page-index" aria-hidden="true">{{ "M3" if page.key == "live" else ("M2" if page.key == "models" else ("M1" if page.key == "cameras" else "M0")) }}</span>
           </div>
 
           {% if page.key == "live" %}
@@ -72,18 +72,20 @@
               class="live-layout"
               data-live-runtime
               data-selected-camera="{{ selected_camera_id or '' }}"
-              data-state="{{ runtime_status.state }}"
+              data-selected-model="{{ selected_model_id or '' }}"
+              data-state="{{ live_status.state }}"
             >
               <section class="card live-control-card">
                 <div class="card-heading">
                   <div>
-                    <span class="eyebrow">Preview lifecycle</span>
-                    <h2>One active camera</h2>
+                    <span class="eyebrow">Detection lifecycle</span>
+                    <h2>One active pipeline</h2>
                   </div>
                   <span class="card-icon" aria-hidden="true">LIVE</span>
                 </div>
                 <p class="form-note">
-                  M1 uses one latest frame. Reconnect waits stop immediately when you press Stop.
+                  Detection uses a bounded processed-frame stream. The raw MJPEG preview below is
+                  separate and never supplies detection overlays.
                 </p>
                 <label class="field-label" for="live-camera">Selected camera</label>
                 <select id="live-camera" name="camera_id" {% if not cameras %}disabled{% endif %}>
@@ -97,8 +99,61 @@
                     <option>No camera profiles</option>
                   {% endif %}
                 </select>
+                <label class="field-label" for="live-model">Selected model</label>
+                <select id="live-model" name="model_id" {% if not models %}disabled{% endif %}>
+                  {% set runtime_models = models|selectattr("runtime_valid")|list %}
+                  {% if runtime_models %}
+                    {% for model in runtime_models %}
+                      <option
+                        value="{{ model.id }}"
+                        {% if model.id == selected_model_id or (not selected_model_id and model.active) %}selected{% endif %}
+                      >
+                        {{ model.display_name }}
+                      </option>
+                    {% endfor %}
+                  {% else %}
+                    <option value="">No runtime-valid models</option>
+                  {% endif %}
+                </select>
+                <div class="form-row">
+                  <div>
+                    <label class="field-label" for="live-threshold">Confidence threshold</label>
+                    <input
+                      id="live-threshold"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value="{{ live_status.confidence_threshold or 0.35 }}"
+                      {% if not runtime_models %}disabled{% endif %}
+                    >
+                  </div>
+                  <output class="live-threshold-value" id="live-threshold-value" for="live-threshold">
+                    {{ "%.2f"|format(live_status.confidence_threshold or 0.35) }}
+                  </output>
+                </div>
+                <label class="field-label" for="live-compute">Compute configuration</label>
+                <select id="live-compute" {% if not runtime_models %}disabled{% endif %}>
+                  <option value="all">All</option>
+                  <option value="cpu_only">CPU only</option>
+                  <option value="cpu_and_gpu">CPU and GPU</option>
+                  <option value="cpu_and_ne">CPU and Neural Engine</option>
+                </select>
                 <div class="live-actions">
-                  <button class="save-button" id="live-start" type="button" {% if not cameras %}disabled{% endif %}>
+                  <button
+                    class="save-button"
+                    id="live-start-detection"
+                    type="button"
+                    {% if not cameras or not runtime_models %}disabled{% endif %}
+                  >
+                    Start detection
+                  </button>
+                  <button class="quiet-button" id="live-stop-detection" type="button">
+                    Stop detection
+                  </button>
+                </div>
+                <div class="live-actions live-actions-secondary">
+                  <button class="quiet-button" id="live-start" type="button" {% if not cameras %}disabled{% endif %}>
                     Start preview
                   </button>
                   <button class="quiet-button" id="live-stop" type="button" {% if not cameras %}disabled{% endif %}>
@@ -109,21 +164,26 @@
                   {% if runtime_status.state == "failed" %}
                     The source failed to open{% if runtime_status.last_error %}: {{ runtime_status.last_error }}{% endif %}.
                     Fix the source settings, then press Start preview.
-                  {% elif runtime_status.state == "stopping" %}
+                  {% elif live_status.state == "failed" %}
+                    Detection failed{% if live_status.failure %}: {{ live_status.failure.message }}{% endif %}.
+                    Fix the source or model, then press Start detection.
+                  {% elif runtime_status.state == "stopping" or live_status.state == "stopping" %}
                     Stopping the camera and releasing source resources.
-                  {% elif cameras %}
-                    Select a camera and start the preview.
+                  {% elif cameras and runtime_models %}
+                    Select a camera and model, then start detection. You can also start the raw preview.
+                  {% elif not cameras %}
+                    Add a camera profile before starting detection.
                   {% else %}
-                    Add a camera profile before starting a preview.
+                    Import and validate a model before starting detection.
                   {% endif %}
                 </p>
-                <a class="text-link" id="live-snapshot" href="#" hidden>Open current JPEG snapshot</a>
+                <a class="text-link" id="live-snapshot" href="#" hidden>Open raw JPEG snapshot</a>
               </section>
 
-              <section class="card live-preview-card">
+              <section class="card live-preview-card live-raw-preview-card">
                 <div class="card-heading">
                   <div>
-                    <span class="eyebrow">Current frame</span>
+                    <span class="eyebrow">Raw camera path</span>
                     <h2 id="live-preview-title">Preview is stopped</h2>
                   </div>
                   <span class="camera-state" id="live-state">{{ runtime_status.state|title }}</span>
@@ -145,6 +205,49 @@
                   <div><dt>Reconnect attempt</dt><dd id="live-reconnect">0</dd></div>
                   <div><dt>Frame age</dt><dd id="live-age">Unavailable</dd></div>
                   <div><dt>Replaced frames</dt><dd id="live-replaced">0</dd></div>
+                </dl>
+              </section>
+
+              <section class="card live-preview-card live-processed-preview-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Processed display unit</span>
+                    <h2 id="live-processed-title">Detection is stopped</h2>
+                  </div>
+                  <span class="camera-state" id="live-processed-state">Idle</span>
+                </div>
+                <p class="form-note">
+                  Every visible box uses the JSON header and JPEG bytes from the same processed frame.
+                </p>
+                <div class="processed-stage" id="live-processed-stage">
+                  <div class="preview-empty" id="live-processed-empty">
+                    <span class="empty-orbit small" aria-hidden="true"><span></span><span></span><span></span></span>
+                    <strong>Waiting for a processed frame</strong>
+                    <span>Start detection to receive synchronized JPEG display units.</span>
+                  </div>
+                  <div class="processed-frame" id="live-processed-frame" hidden>
+                    <img id="live-processed-preview" alt="Current processed camera frame">
+                  </div>
+                </div>
+                <label class="check-field live-overlay-toggle">
+                  <input id="live-overlay-enabled" type="checkbox" checked>
+                  Show detection overlay
+                </label>
+                <dl class="live-metrics live-processed-metrics">
+                  <div><dt>Processed FPS</dt><dd id="live-processed-fps">Unavailable</dd></div>
+                  <div><dt>Capture age</dt><dd id="live-processed-age">Unavailable</dd></div>
+                  <div><dt>Preprocessing</dt><dd id="live-processed-preprocessing">Unavailable</dd></div>
+                  <div><dt>Prediction current</dt><dd id="live-processed-prediction">Unavailable</dd></div>
+                  <div><dt>Prediction P50</dt><dd id="live-processed-p50">Unavailable</dd></div>
+                  <div><dt>Prediction P95</dt><dd id="live-processed-p95">Unavailable</dd></div>
+                  <div><dt>Postprocessing</dt><dd id="live-processed-postprocessing">Unavailable</dd></div>
+                  <div><dt>End-to-end latency</dt><dd id="live-processed-e2e">Unavailable</dd></div>
+                  <div><dt>Source replaced</dt><dd id="live-processed-source-replaced">0</dd></div>
+                  <div><dt>Inference replaced</dt><dd id="live-processed-inference-replaced">0</dd></div>
+                  <div><dt>Display replaced</dt><dd id="live-processed-display-replaced">0</dd></div>
+                  <div><dt>Frame sequence</dt><dd id="live-processed-sequence">Unavailable</dd></div>
+                  <div><dt>Stream epoch</dt><dd id="live-processed-epoch">Unavailable</dd></div>
+                  <div><dt>Capture session</dt><dd id="live-processed-session">Unavailable</dd></div>
                 </dl>
               </section>
             </div>
