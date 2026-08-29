@@ -205,16 +205,24 @@ checks:
 
 ### Still-image inference contracts
 
-Install the optional Core ML dependency on an Apple Silicon Mac with:
+Install the project on an Apple Silicon Mac with:
 
 ```bash
-uv sync --extra coreml
+uv sync --locked
 ```
 
 The supported compute choices are `all`, `cpu_only`, `cpu_and_gpu`, and
 `cpu_and_ne`. Core ML maps these choices to `ct.ComputeUnit.ALL`,
 `CPU_ONLY`, `CPU_AND_GPU`, and `CPU_AND_NE`. A compute-unit change always
 closes the old model instance and loads a new one.
+
+The manifest must declare `outputs.box_format` as `xyxy` or `xywh` and
+`outputs.coordinate_space` as `model_pixels` or `normalized`. Normalized
+coordinates are scaled by the declared model width and height before inverse
+letterbox mapping. A raw output must also declare `raw_layout` as
+`candidates_first` (`[N,A]`), `channels_first` (`[1,A,N]`), or `channels_last`
+(`[1,N,A]`), and must declare `raw_has_objectness`. The adapter does not infer
+box geometry, coordinate space, objectness, or matrix orientation.
 
 The adapter returns source-image pixel boxes only. It applies manifest-defined
 confidence and IoU thresholds, rejects non-finite or invalid candidates,
@@ -228,7 +236,7 @@ managed fixture and run:
 ```bash
 OPEN_LICENSEPLATE_COREML_PACKAGE=/path/to/model.mlpackage \
 OPEN_LICENSEPLATE_COREML_MANIFEST=/path/to/model-manifest.yaml \
-uv run pytest -m macos tests/macos/test_coreml_backend.py
+uv run pytest -m macos
 ```
 
 ### Empty development fixture

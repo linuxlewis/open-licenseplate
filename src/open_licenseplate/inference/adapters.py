@@ -42,7 +42,7 @@ class UltralyticsYoloNmsAdapter:
                 raise DetectionValidationError(
                     "backend output is missing the manifest-declared boxes or scores name"
                 )
-            boxes = _normalise_boxes(values[boxes_name], transform.box_format)
+            boxes = _normalise_boxes(values[boxes_name])
             scores, inferred_classes = _normalise_scores(values[scores_name], len(boxes))
             classes = inferred_classes
             if classes_name is not None and classes_name in values:
@@ -54,7 +54,7 @@ class UltralyticsYoloNmsAdapter:
                 )
             boxes, scores, classes = _decode_raw_output(
                 values[transform.raw_output_name],
-                transform.box_format,
+                transform.raw_layout,
                 transform.raw_has_objectness,
             )
         else:
@@ -67,7 +67,7 @@ class UltralyticsYoloNmsAdapter:
 
         candidates: list[Detection] = []
         for _index, (box, score, class_id) in enumerate(zip(boxes, scores, classes, strict=True)):
-            if not _is_finite_box(box) or not np.isfinite(score):
+            if not _has_finite_values(box) or not np.isfinite(score):
                 rejected += 1
                 continue
             if not 0 <= float(score) <= 1:
@@ -80,7 +80,15 @@ class UltralyticsYoloNmsAdapter:
             if class_number >= len(transform.labels):
                 rejected += 1
                 continue
-            source_box = transform.model_to_source_box(box)
+            try:
+                model_box = _to_model_xyxy(box, transform)
+            except (TypeError, ValueError):
+                rejected += 1
+                continue
+            if not _is_finite_box(model_box):
+                rejected += 1
+                continue
+            source_box = transform.model_to_source_box(model_box)
             clipped = _clip_box(
                 source_box,
                 width=transform.source_width,
@@ -112,8 +120,8 @@ class UltralyticsYoloNmsAdapter:
         )
 
 
-def _normalise_boxes(value: Any, box_format: str) -> list[tuple[float, float, float, float]]:
-    array = _squeeze_batch(_output_array(value, "boxes"))
+def _normalise_boxes(value: Any) -> list[tuple[float, float, float, float]]:
+    array = _output_array(value, "boxes")
     if array.size == 0:
         return []
     if array.ndim == 1:
@@ -121,29 +129,25 @@ def _normalise_boxes(value: Any, box_format: str) -> list[tuple[float, float, fl
             raise DetectionValidationError("boxes output must contain four coordinates per box")
         array = array.reshape(1, 4)
     elif array.ndim == 2:
-        if array.shape[1] == 4:
-            pass
-        elif array.shape[0] == 4:
-            array = array.T
-        else:
+        if array.shape[1] != 4:
             raise DetectionValidationError("boxes output must have a coordinate axis of length 4")
+    elif array.ndim == 3 and array.shape[0] == 1 and array.shape[2] == 4:
+        array = array[0]
     else:
-        array = _flatten_coordinate_array(array)
+        raise DetectionValidationError(
+            "named boxes output must be [N,4] or [1,N,4] with coordinate axis last"
+        )
     if array.shape[-1] != 4:
         raise DetectionValidationError("boxes output must have a coordinate axis of length 4")
     try:
         rows = [(float(row[0]), float(row[1]), float(row[2]), float(row[3])) for row in array]
     except (TypeError, ValueError) as error:
         raise DetectionValidationError("boxes output must contain numeric values") from error
-    if box_format == "xywh":
-        return [_xywh_to_xyxy(row) for row in rows]
-    if box_format != "xyxy":
-        raise DetectionValidationError(f"unsupported box format: {box_format}")
     return rows
 
 
 def _normalise_scores(value: Any, candidate_count: int) -> tuple[list[float], list[int]]:
-    array = _squeeze_batch(_output_array(value, "scores"))
+    array = _output_array(value, "scores")
     if not np.issubdtype(array.dtype, np.number):
         raise DetectionValidationError("scores output must contain numeric values")
     if array.size == 0 and candidate_count == 0:
@@ -159,12 +163,14 @@ def _normalise_scores(value: Any, candidate_count: int) -> tuple[list[float], li
     elif array.ndim == 2:
         if array.shape[0] == candidate_count:
             pass
-        elif array.shape[1] == candidate_count:
-            array = array.T
         else:
             raise DetectionValidationError("scores output count does not match boxes")
+    elif array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+        if array.shape[0] != candidate_count:
+            raise DetectionValidationError("scores output count does not match boxes")
     else:
-        raise DetectionValidationError("scores output must be one or two dimensional")
+        raise DetectionValidationError("scores output must be [N,C] or [1,N,C]")
 
     if array.shape[0] != candidate_count:
         raise DetectionValidationError("scores output count does not match boxes")
@@ -188,7 +194,13 @@ def _normalise_scores(value: Any, candidate_count: int) -> tuple[list[float], li
 
 
 def _normalise_classes(value: Any, candidate_count: int) -> list[int]:
-    array = _squeeze_batch(_output_array(value, "classes"))
+    array = _output_array(value, "classes")
+    if array.ndim == 3 and array.shape[0] == 1 and array.shape[2] == 1:
+        array = array[0, :, 0]
+    elif array.ndim == 2 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim != 1:
+        raise DetectionValidationError("classes output must be [N] or [1,N]")
     if array.size != candidate_count:
         raise DetectionValidationError("classes output count does not match boxes")
     classes: list[int] = []
@@ -206,36 +218,42 @@ def _normalise_classes(value: Any, candidate_count: int) -> list[int]:
 
 def _decode_raw_output(
     value: Any,
-    box_format: str,
-    raw_has_objectness: bool,
+    raw_layout: str | None,
+    raw_has_objectness: bool | None,
 ) -> tuple[list[tuple[float, float, float, float]], list[float], list[int]]:
-    array = _squeeze_batch(_output_array(value, "raw"))
+    array = _output_array(value, "raw")
     if not np.issubdtype(array.dtype, np.number):
         raise DetectionValidationError("raw output must contain numeric values")
     if array.size == 0:
         return [], [], []
-    if array.ndim == 1:
-        array = array.reshape(1, -1)
-    if array.ndim != 2:
-        raise DetectionValidationError("raw output must be one or two dimensional after batching")
-    if array.shape[1] < 5 or (array.shape[0] <= 128 and array.shape[1] > array.shape[0]):
-        array = array.T
-    if array.shape[1] < 5:
-        raise DetectionValidationError("raw output must contain at least five values per candidate")
+    if raw_layout not in {"candidates_first", "channels_first", "channels_last"}:
+        raise DetectionValidationError("raw output requires an explicit layout")
+    if not isinstance(raw_has_objectness, bool):
+        raise DetectionValidationError("raw output requires explicit objectness metadata")
+    if raw_layout == "candidates_first":
+        if array.ndim != 2:
+            raise DetectionValidationError("candidates_first raw output must be [N,A]")
+        rows = array
+    elif raw_layout == "channels_first":
+        if array.ndim != 3 or array.shape[0] != 1:
+            raise DetectionValidationError("channels_first raw output must be [1,A,N]")
+        rows = array[0].T
+    else:
+        if array.ndim != 3 or array.shape[0] != 1:
+            raise DetectionValidationError("channels_last raw output must be [1,N,A]")
+        rows = array[0]
+    if rows.shape[1] < (6 if raw_has_objectness else 5):
+        raise DetectionValidationError("raw output has too few values per candidate")
 
-    boxes = _normalise_boxes(array[:, :4], box_format)
+    boxes = _normalise_boxes(rows[:, :4])
     if not raw_has_objectness:
-        class_scores = array[:, 4:]
+        class_scores = rows[:, 4:]
         class_ids = np.argmax(class_scores, axis=1)
         scores = [float(class_scores[index, class_id]) for index, class_id in enumerate(class_ids)]
         classes = [int(value) for value in class_ids]
     else:
-        if array.shape[1] < 6:
-            raise DetectionValidationError(
-                "raw output with objectness must contain an objectness and class score"
-            )
-        objectness = array[:, 4]
-        class_scores = array[:, 5:]
+        objectness = rows[:, 4]
+        class_scores = rows[:, 5:]
         class_ids = np.argmax(class_scores, axis=1)
         scores = [
             float(objectness[index] * class_scores[index, class_id])
@@ -252,19 +270,24 @@ def _output_array(value: Any, label: str) -> np.ndarray:
         raise DetectionValidationError(f"{label} output is not an array") from error
 
 
-def _squeeze_batch(array: np.ndarray) -> np.ndarray:
-    while array.ndim > 2 and array.shape[0] == 1:
-        array = array[0]
-    return array
-
-
-def _flatten_coordinate_array(array: np.ndarray) -> np.ndarray:
-    coordinate_axes = [axis for axis, size in enumerate(array.shape) if size == 4]
-    if not coordinate_axes:
-        raise DetectionValidationError("boxes output must have a coordinate axis of length 4")
-    coordinate_axis = coordinate_axes[-1]
-    moved = np.moveaxis(array, coordinate_axis, -1)
-    return moved.reshape(-1, 4)
+def _to_model_xyxy(
+    box: Sequence[float],
+    transform: ImageTransform,
+) -> tuple[float, float, float, float]:
+    """Convert one explicitly declared box geometry to model-space xyxy."""
+    x1, y1, x2, y2 = (float(value) for value in box)
+    if transform.coordinate_space == "normalized":
+        x1, y1, x2, y2 = (
+            x1 * transform.model_width,
+            y1 * transform.model_height,
+            x2 * transform.model_width,
+            y2 * transform.model_height,
+        )
+    if transform.box_format == "xywh":
+        return _xywh_to_xyxy((x1, y1, x2, y2))
+    if transform.box_format == "xyxy":
+        return x1, y1, x2, y2
+    raise DetectionValidationError(f"unsupported box format: {transform.box_format}")
 
 
 def _xywh_to_xyxy(box: Sequence[float]) -> tuple[float, float, float, float]:
@@ -282,6 +305,15 @@ def _is_finite_box(box: Sequence[float]) -> bool:
         return False
     values = tuple(float(value) for value in box)
     return bool(np.isfinite(values).all() and values[0] < values[2] and values[1] < values[3])
+
+
+def _has_finite_values(values: Sequence[float]) -> bool:
+    if len(values) != 4:
+        return False
+    try:
+        return bool(np.isfinite(tuple(float(value) for value in values)).all())
+    except (TypeError, ValueError):
+        return False
 
 
 def _clip_box(

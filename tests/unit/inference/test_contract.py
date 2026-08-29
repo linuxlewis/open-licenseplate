@@ -37,6 +37,8 @@ def test_image_transform_maps_boxes_in_both_directions() -> None:
         resize="letterbox",
         scale_x=0.5,
         scale_y=0.5,
+        box_format="xyxy",
+        coordinate_space="model_pixels",
         pad_top=140,
         resized_width=640,
         resized_height=360,

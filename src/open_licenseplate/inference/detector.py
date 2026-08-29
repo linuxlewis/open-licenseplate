@@ -26,22 +26,28 @@ class DetectorSession:
     loaded: LoadedModel | None = None
 
     def load(self) -> LoadedModel:
-        """Load a new model instance and close any previous instance."""
-        if self.loaded is not None:
-            self.backend.close(self.loaded)
+        """Load and validate a new instance before replacing the current one."""
         loaded = self.backend.load(self.descriptor, self.options)
         try:
             compare_manifest_to_inspection(self.descriptor.manifest, loaded.inspection)
         except Exception:
             self.backend.close(loaded)
             raise
+        previous = self.loaded
         self.loaded = loaded
+        if previous is not None:
+            self.backend.close(previous)
         return self.loaded
 
     def set_compute_units(self, options: BackendOptions) -> LoadedModel:
         """Reload the model so a compute-unit change cannot reuse old state."""
+        previous_options = self.options
         self.options = options
-        return self.load()
+        try:
+            return self.load()
+        except Exception:
+            self.options = previous_options
+            raise
 
     def detect(self, image: StillImage) -> DetectionBatch:
         """Detect one image with the current model instance."""

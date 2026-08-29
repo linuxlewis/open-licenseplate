@@ -209,15 +209,37 @@ def _validate_outputs(value: Any) -> None:
         raise ModelManifestError(f"manifest outputs.{missing} is required")
     if not (has_raw or (has_boxes and has_scores)):
         raise ModelManifestError("manifest outputs.boxes and outputs.scores are required")
+    for field_name in ("box_format", "coordinate_space"):
+        if field_name not in values:
+            raise ModelManifestError(f"manifest outputs.{field_name} is required")
+        _required_section_text(values, "outputs", field_name, max_length=32)
     for field_name in ("boxes", "scores", "raw", "classes"):
         if field_name in values:
             _required_section_text(values, "outputs", field_name, max_length=255)
-    box_format = values.get("box_format", "xyxy")
+    box_format = values["box_format"]
     if not isinstance(box_format, str) or box_format not in {"xyxy", "xywh"}:
         raise ModelManifestError("manifest outputs.box_format must be xyxy or xywh")
-    raw_has_objectness = values.get("raw_has_objectness", False)
-    if not isinstance(raw_has_objectness, bool):
-        raise ModelManifestError("manifest outputs.raw_has_objectness must be boolean")
+    coordinate_space = values["coordinate_space"]
+    if coordinate_space not in {"model_pixels", "normalized"}:
+        raise ModelManifestError(
+            "manifest outputs.coordinate_space must be model_pixels or normalized"
+        )
+    if has_raw:
+        for field_name in ("raw_layout", "raw_has_objectness"):
+            if field_name not in values:
+                raise ModelManifestError(f"manifest outputs.{field_name} is required with raw")
+        raw_layout = _required_section_text(values, "outputs", "raw_layout", max_length=32)
+        if raw_layout not in {"candidates_first", "channels_first", "channels_last"}:
+            raise ModelManifestError(
+                "manifest outputs.raw_layout must be candidates_first, "
+                "channels_first, or channels_last"
+            )
+        if not isinstance(values["raw_has_objectness"], bool):
+            raise ModelManifestError("manifest outputs.raw_has_objectness must be boolean")
+    elif "raw_layout" in values or "raw_has_objectness" in values:
+        raise ModelManifestError(
+            "manifest outputs.raw_layout and raw_has_objectness require outputs.raw"
+        )
 
 
 def _validate_labels(value: Any) -> None:

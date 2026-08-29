@@ -3,13 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from model_helpers import create_model_fixture
 from open_licenseplate.inference import (
+    BackendContractError,
+    BackendInspection,
     BackendOptions,
     BackendStillImageDetector,
     ComputeUnit,
     DetectorSession,
+    FeatureDescription,
     ModelDescriptor,
     StillImage,
 )
@@ -70,3 +74,70 @@ def test_compute_unit_change_closes_and_reloads_a_new_instance(tmp_path: Path) -
         ComputeUnit.CPU_AND_NE,
     ]
     session.close()
+
+
+class _ReloadFailureBackend(FakeBackend):
+    def __init__(self, descriptor: ModelDescriptor) -> None:
+        super().__init__()
+        self.descriptor = descriptor
+        self.fail_load = False
+        self.fail_contract = False
+
+    def load(self, model: ModelDescriptor, options: BackendOptions):
+        if self.fail_load:
+            raise RuntimeError("simulated new model load failure")
+        loaded = super().load(model, options)
+        if self.fail_contract:
+            loaded.inspection = BackendInspection(
+                backend="coreml",
+                inputs=(
+                    FeatureDescription(
+                        name="wrong_input",
+                        kind="image",
+                        width=640,
+                        height=640,
+                        color_space="rgb",
+                    ),
+                ),
+                outputs=loaded.inspection.outputs,
+            )
+        return loaded
+
+
+def test_failed_compute_unit_reload_keeps_the_previous_open_model(tmp_path: Path) -> None:
+    descriptor = _descriptor(tmp_path)
+    backend = _ReloadFailureBackend(descriptor)
+    session = DetectorSession(
+        backend=backend,
+        descriptor=descriptor,
+        options=BackendOptions(),
+    )
+    first = session.load()
+    backend.fail_contract = True
+
+    with pytest.raises(BackendContractError, match="input name"):
+        session.set_compute_units(BackendOptions(compute_units=ComputeUnit.CPU_ONLY))
+
+    assert session.loaded is first
+    assert first.closed is False
+    assert session.options.compute_units is ComputeUnit.ALL
+    assert backend.loads[-1].closed is True
+
+
+def test_load_failure_keeps_the_previous_open_model(tmp_path: Path) -> None:
+    descriptor = _descriptor(tmp_path)
+    backend = _ReloadFailureBackend(descriptor)
+    session = DetectorSession(
+        backend=backend,
+        descriptor=descriptor,
+        options=BackendOptions(),
+    )
+    first = session.load()
+    backend.fail_load = True
+
+    with pytest.raises(RuntimeError, match="load failure"):
+        session.set_compute_units(BackendOptions(compute_units=ComputeUnit.CPU_ONLY))
+
+    assert session.loaded is first
+    assert first.closed is False
+    assert session.options.compute_units is ComputeUnit.ALL

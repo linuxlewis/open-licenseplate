@@ -36,7 +36,12 @@ def create_model_fixture(
             "color_space": "rgb",
         },
         "preprocessing": {"resize": "letterbox"},
-        "outputs": {"boxes": "coordinates", "scores": "confidence"},
+        "outputs": {
+            "boxes": "coordinates",
+            "scores": "confidence",
+            "box_format": "xyxy",
+            "coordinate_space": "model_pixels",
+        },
         "labels": ["license_plate"],
         "defaults": {"confidence_threshold": 0.35, "iou_threshold": 0.45},
         "compatibility": {"minimum_macos": "14.0"},

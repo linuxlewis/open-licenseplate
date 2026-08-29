@@ -150,6 +150,8 @@ class ImageTransform:
     resize: str
     scale_x: float
     scale_y: float
+    box_format: str
+    coordinate_space: str
     pad_left: int = 0
     pad_top: int = 0
     resized_width: int | None = None
@@ -159,11 +161,11 @@ class ImageTransform:
     labels: tuple[str, ...] = ()
     confidence_threshold: float = 0.0
     iou_threshold: float = 0.0
-    box_format: str = "xyxy"
     output_names: tuple[tuple[str, str], ...] = ()
     raw_output_name: str | None = None
     class_output_name: str | None = None
-    raw_has_objectness: bool = False
+    raw_layout: str | None = None
+    raw_has_objectness: bool | None = None
     frame_sequence: int | None = None
     captured_at: datetime | None = None
 
@@ -184,10 +186,21 @@ class ImageTransform:
             raise ValueError("image transform resize is not supported")
         if self.box_format not in {"xyxy", "xywh"}:
             raise ValueError("image transform box_format must be xyxy or xywh")
+        if self.coordinate_space not in {"model_pixels", "normalized"}:
+            raise ValueError("image transform coordinate_space must be model_pixels or normalized")
         if not 0 <= self.confidence_threshold <= 1:
             raise ValueError("confidence threshold must be between 0 and 1")
         if not 0 <= self.iou_threshold <= 1:
             raise ValueError("IoU threshold must be between 0 and 1")
+        if self.raw_output_name is None and (
+            self.raw_layout is not None or self.raw_has_objectness is not None
+        ):
+            raise ValueError("raw layout values require a raw output name")
+        if self.raw_output_name is not None and (
+            self.raw_layout not in {"candidates_first", "channels_first", "channels_last"}
+            or not isinstance(self.raw_has_objectness, bool)
+        ):
+            raise ValueError("raw output requires explicit layout and objectness values")
 
     def model_to_source_box(
         self,
@@ -233,6 +246,10 @@ class ImageTransform:
             "pad_top": self.pad_top,
             "resized_width": self.resized_width,
             "resized_height": self.resized_height,
+            "box_format": self.box_format,
+            "coordinate_space": self.coordinate_space,
+            "raw_layout": self.raw_layout,
+            "raw_has_objectness": self.raw_has_objectness,
         }
 
     @property

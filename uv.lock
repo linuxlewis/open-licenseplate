@@ -352,6 +352,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "av" },
+    { name = "coremltools", marker = "sys_platform == 'darwin'" },
     { name = "fastapi" },
     { name = "jinja2" },
     { name = "numpy" },
@@ -363,11 +364,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "sqlalchemy" },
     { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-coreml = [
-    { name = "coremltools", marker = "sys_platform == 'darwin'" },
 ]
 
 [package.dev-dependencies]
@@ -384,7 +380,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.14,<2" },
     { name = "av", specifier = ">=14,<17" },
-    { name = "coremltools", marker = "sys_platform == 'darwin' and extra == 'coreml'", specifier = ">=8,<9" },
+    { name = "coremltools", marker = "sys_platform == 'darwin'", specifier = ">=8,<9" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "jinja2", specifier = ">=3.1,<4" },
     { name = "numpy", specifier = ">=2,<3" },
@@ -397,7 +393,6 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "uvicorn", specifier = ">=0.32,<1" },
 ]
-provides-extras = ["coreml"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -17,7 +17,10 @@ def prepare_image(image: StillImage, manifest: ModelManifest) -> PreparedInput:
     """Convert, resize, and pad an image using the manifest contract."""
     input_values = manifest.raw["input"]
     preprocessing_values = manifest.raw["preprocessing"]
-    if not isinstance(input_values, dict) or not isinstance(preprocessing_values, dict):
+    output_values = manifest.raw["outputs"]
+    if not all(
+        isinstance(value, dict) for value in (input_values, preprocessing_values, output_values)
+    ):
         raise PreprocessingError("manifest input or preprocessing section is invalid")
 
     input_name = input_values["name"]
@@ -25,6 +28,10 @@ def prepare_image(image: StillImage, manifest: ModelManifest) -> PreparedInput:
     model_height = int(input_values["height"])
     target_color_space = str(input_values["color_space"]).casefold()
     resize = str(preprocessing_values["resize"]).casefold()
+    box_format = output_values["box_format"]
+    coordinate_space = output_values["coordinate_space"]
+    if not isinstance(box_format, str) or not isinstance(coordinate_space, str):
+        raise PreprocessingError("manifest output geometry is invalid")
     source = _convert_color_space(image.pixels, image.color_space, target_color_space)
 
     if resize == "none":
@@ -43,6 +50,8 @@ def prepare_image(image: StillImage, manifest: ModelManifest) -> PreparedInput:
             scale_y=1.0,
             resized_width=model_width,
             resized_height=model_height,
+            box_format=box_format,
+            coordinate_space=coordinate_space,
             frame_sequence=image.frame_sequence,
             captured_at=image.captured_at,
         )
@@ -58,6 +67,8 @@ def prepare_image(image: StillImage, manifest: ModelManifest) -> PreparedInput:
             scale_y=model_height / image.height,
             resized_width=model_width,
             resized_height=model_height,
+            box_format=box_format,
+            coordinate_space=coordinate_space,
             frame_sequence=image.frame_sequence,
             captured_at=image.captured_at,
         )
@@ -88,6 +99,8 @@ def prepare_image(image: StillImage, manifest: ModelManifest) -> PreparedInput:
             pad_top=pad_top,
             resized_width=resized_width,
             resized_height=resized_height,
+            box_format=box_format,
+            coordinate_space=coordinate_space,
             frame_sequence=image.frame_sequence,
             captured_at=image.captured_at,
         )
@@ -121,11 +134,17 @@ def enrich_transform(
         for role, name in outputs.items()
         if role in {"boxes", "scores", "classes"} and isinstance(name, str)
     )
-    raw_output_name = outputs.get("raw")
     class_output_name = outputs.get("classes")
-    raw_has_objectness = outputs.get("raw_has_objectness", False)
-    if not isinstance(raw_has_objectness, bool):
-        raise PreprocessingError("manifest outputs.raw_has_objectness must be boolean")
+    raw_output_name = outputs.get("raw")
+    raw_layout = outputs.get("raw_layout")
+    raw_has_objectness = outputs.get("raw_has_objectness")
+    if raw_output_name is not None:
+        if not isinstance(raw_output_name, str):
+            raise PreprocessingError("manifest outputs.raw must be text")
+        if not isinstance(raw_layout, str) or not isinstance(raw_has_objectness, bool):
+            raise PreprocessingError("manifest raw output geometry is incomplete")
+    elif raw_layout is not None or raw_has_objectness is not None:
+        raise PreprocessingError("manifest raw output geometry is unexpected")
     transform = replace(
         prepared.transform,
         model_id=manifest.model_id,
@@ -133,10 +152,12 @@ def enrich_transform(
         labels=tuple(labels),
         confidence_threshold=float(defaults["confidence_threshold"]),
         iou_threshold=float(defaults["iou_threshold"]),
-        box_format=str(outputs.get("box_format", "xyxy")).casefold(),
+        box_format=str(outputs["box_format"]).casefold(),
+        coordinate_space=str(outputs["coordinate_space"]).casefold(),
         output_names=output_names,
-        raw_output_name=raw_output_name if isinstance(raw_output_name, str) else None,
+        raw_output_name=raw_output_name,
         class_output_name=class_output_name if isinstance(class_output_name, str) else None,
+        raw_layout=raw_layout,
         raw_has_objectness=raw_has_objectness,
     )
     return replace(prepared, transform=transform)

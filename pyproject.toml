@@ -12,6 +12,7 @@ authors = [{ name = "open-licenseplate contributors" }]
 dependencies = [
     "alembic>=1.14,<2",
     "av>=14,<17",
+    "coremltools>=8,<9; sys_platform == 'darwin'",
     "fastapi>=0.115,<1",
     "jinja2>=3.1,<4",
     "numpy>=2,<3",
@@ -36,11 +37,6 @@ dev = [
     "pytest>=8.3,<9",
     "ruff>=0.8,<1",
     "types-PyYAML>=6.0.12,<7",
-]
-
-[project.optional-dependencies]
-coreml = [
-    "coremltools>=8,<9; sys_platform == 'darwin'",
 ]
 
 [tool.hatch.build.targets.wheel]
