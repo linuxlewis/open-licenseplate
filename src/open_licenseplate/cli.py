@@ -61,6 +61,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser = commands.add_parser("doctor", help="check local application readiness")
     doctor_parser.add_argument("--json", action="store_true", help="write diagnostics as JSON")
     _add_runtime_options(doctor_parser)
+
+    dev_parser = commands.add_parser("dev", help="development-only commands")
+    dev_commands = dev_parser.add_subparsers(dest="dev_command")
+    fixture_parser = dev_commands.add_parser(
+        "fixture",
+        help="create empty managed directories without application data",
+    )
+    _add_runtime_options(fixture_parser)
     return parser
 
 
@@ -213,6 +221,19 @@ def _run_doctor(arguments: argparse.Namespace) -> int:
     return 0 if ready else 1
 
 
+def _run_dev_fixture(arguments: argparse.Namespace) -> int:
+    """Create an empty managed directory layout without creating application data."""
+    settings = load_settings(
+        cli_overrides=_cli_overrides(arguments),
+        include_persisted=False,
+    )
+    paths = ManagedPaths.from_settings(settings)
+    paths.ensure_directories()
+    print(f"Empty development fixture ready at {paths.data_dir}")
+    print("No camera, model, plate, event, job, or OCR data was created.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one CLI command and return its process exit code."""
     parser = build_parser()
@@ -226,6 +247,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_settings_set(arguments)
         if arguments.command == "doctor":
             return _run_doctor(arguments)
+        if arguments.command == "dev" and arguments.dev_command == "fixture":
+            return _run_dev_fixture(arguments)
     except (SettingsError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

@@ -40,8 +40,11 @@ jobs:
       - name: Install Chromium for browser smoke tests
         run: uv run playwright install --with-deps chromium
 
+      - name: Run M0 acceptance
+        run: uv run pytest -m m0_acceptance
+
       - name: Run browser smoke tests
-        run: uv run pytest -m browser
+        run: uv run pytest -m "browser and not m0_acceptance"
 
       - name: Run tests
         run: uv run pytest -m "not browser"

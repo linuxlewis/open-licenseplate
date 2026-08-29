@@ -41,6 +41,7 @@ testpaths = ["tests"]
 markers = [
     "browser: tests that exercise the shell in a real browser",
     "integration: tests that exercise application boundaries",
+    "m0_acceptance: the complete M0 operator workflow",
 ]
 
 [tool.ruff]
