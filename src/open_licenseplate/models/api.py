@@ -255,6 +255,19 @@ async def _set_model_active(
         model = repository.get(model_id)
         if model is None:
             return _error("model was not found", status_code=404)
+        live_pipeline = getattr(request.app.state, "live_pipeline", None)
+        if live_pipeline is not None and live_pipeline.is_running:
+            active_model_id = live_pipeline.model_id
+            if active and active_model_id != model_id:
+                return _error(
+                    "stop the live pipeline before switching the model",
+                    status_code=409,
+                )
+            if not active and active_model_id == model_id:
+                return _error(
+                    "stop the live pipeline before switching the model",
+                    status_code=409,
+                )
         if active:
             if model.validation_state != RUNTIME_VALID:
                 return _error(

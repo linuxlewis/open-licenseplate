@@ -11,7 +11,7 @@ from typing import Any, Literal, Protocol
 
 from ..cameras.repository import CameraConfig
 from ..redaction import redact_text, redact_value
-from .broker import LatestFrameBroker
+from .broker import LatestFrameBroker, LatestFrameSubscription
 from .contracts import Clock, FrameSource, SourceError, SourceInfo, SystemClock, VideoFrame
 from .worker import FrameCaptureWorker
 
@@ -412,6 +412,14 @@ class CameraRuntime:
                 return None
             broker = self._broker
         return broker.peek()
+
+    def subscribe(self, camera_id: str) -> LatestFrameSubscription | None:
+        """Create a capacity-one subscription to the active capture broker."""
+        with self._condition:
+            if self._camera_id != camera_id or self._broker is None:
+                return None
+            broker = self._broker
+        return broker.subscribe()
 
     def wait_for_frame(self, camera_id: str, timeout: float) -> VideoFrame | None:
         """Wait for a frame or for the camera to stop."""

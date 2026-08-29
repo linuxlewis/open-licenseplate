@@ -97,6 +97,16 @@ async def update_camera(camera_id: str, request: Request) -> JSONResponse:
         camera = repository.get(camera_id)
         if camera is None:
             return _error("camera was not found", status_code=404)
+        live_pipeline = getattr(request.app.state, "live_pipeline", None)
+        if (
+            live_pipeline is not None
+            and live_pipeline.is_running
+            and live_pipeline.camera_id == camera_id
+        ):
+            return _error(
+                "stop the live pipeline before changing its active camera settings",
+                status_code=409,
+            )
         try:
             config = prepare_camera_config(
                 **_camera_values(
@@ -119,6 +129,16 @@ async def delete_camera(camera_id: str, request: Request) -> JSONResponse:
         return error
     assert database is not None
     try:
+        live_pipeline = getattr(request.app.state, "live_pipeline", None)
+        if (
+            live_pipeline is not None
+            and live_pipeline.is_running
+            and live_pipeline.camera_id == camera_id
+        ):
+            return _error(
+                "stop the live pipeline before deleting its active camera",
+                status_code=409,
+            )
         if not CameraRepository(database).delete(camera_id):
             return _error("camera was not found", status_code=404)
         return _json({"deleted": True, "camera_id": camera_id})
@@ -183,6 +203,16 @@ async def stop_camera(camera_id: str, request: Request) -> JSONResponse:
         database.dispose()
 
     try:
+        live_pipeline = getattr(request.app.state, "live_pipeline", None)
+        if (
+            live_pipeline is not None
+            and live_pipeline.is_running
+            and live_pipeline.camera_id == camera_id
+        ):
+            return _error(
+                "stop the live pipeline before stopping its active camera",
+                status_code=409,
+            )
         status = await asyncio.to_thread(
             request.app.state.camera_runtime.stop,
             camera_id,
