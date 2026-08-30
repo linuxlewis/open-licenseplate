@@ -717,7 +717,6 @@
       const status = await request("/api/v1/live/stop", { method: "POST" });
       detectionActive = false;
       closeDisplaySocket();
-      updateLiveStatus(status);
       if (currentObjectUrl) {
         URL.revokeObjectURL(currentObjectUrl);
         currentObjectUrl = null;
@@ -730,6 +729,7 @@
       }
       processedFrame.hidden = true;
       processedEmpty.hidden = false;
+      updateLiveStatus(status);
       setMessage("Detection stopped. Camera and model resources are released.", "positive");
     } catch (error) {
       setMessage(error.message, "attention");
