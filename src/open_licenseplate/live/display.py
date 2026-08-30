@@ -17,12 +17,14 @@ from PIL import Image
 from ..capture.contracts import VideoFrame
 from ..capture.preview import encode_jpeg
 from ..inference.contract import Detection
+from ..tracking.contracts import ActiveTrack
 
 LIVE_PROTOCOL_VERSION = 1
 MAX_DISPLAY_METADATA_BYTES = 64 * 1024
 MAX_DISPLAY_JPEG_BYTES = 4 * 1024 * 1024
 MAX_DISPLAY_DIMENSION = 8192
 MAX_DISPLAY_DETECTIONS = 256
+MAX_DISPLAY_ACTIVE_TRACKS = 64
 MAX_DISPLAY_SUBSCRIBERS = 16
 MAX_RETIRED_PROVENANCES = 16
 DISPLAY_BUFFER_CAPACITY = 1
@@ -78,6 +80,7 @@ class ProcessedDisplayCandidate:
     source_width: int
     source_height: int
     detections: tuple[Detection, ...]
+    active_tracks: tuple[ActiveTrack, ...]
     threshold: float
     region_of_interest: Mapping[str, int] | None
     metrics: Mapping[str, int | float | None]
@@ -596,6 +599,7 @@ def build_display_candidate(
     threshold: float,
     region_of_interest: Mapping[str, int] | None,
     metrics: Mapping[str, int | float | None],
+    active_tracks: tuple[ActiveTrack, ...] = (),
 ) -> ProcessedDisplayCandidate:
     """Copy one processed frame into a bounded display candidate."""
     pixels = np.ascontiguousarray(np.asarray(frame.data)).copy()
@@ -624,6 +628,7 @@ def build_display_candidate(
         source_width=frame.width,
         source_height=frame.height,
         detections=detections,
+        active_tracks=active_tracks,
         threshold=threshold,
         region_of_interest=None if region_of_interest is None else dict(region_of_interest),
         metrics=dict(metrics),
@@ -651,6 +656,9 @@ def build_display_unit(
     if len(candidate.detections) > MAX_DISPLAY_DETECTIONS:
         raise DisplayMessageTooLarge("processed frame has too many detections")
     detections = [_detection_payload(detection) for detection in candidate.detections]
+    if len(candidate.active_tracks) > MAX_DISPLAY_ACTIVE_TRACKS:
+        raise DisplayMessageTooLarge("processed frame has too many active tracks")
+    active_tracks = [track.as_dict() for track in candidate.active_tracks]
     metadata: dict[str, Any] = {
         "type": "frame_header",
         "message_type": "frame_header",
@@ -670,6 +678,7 @@ def build_display_unit(
         "jpeg_height": jpeg_height,
         "jpeg_byte_count": len(jpeg),
         "detections": detections,
+        "active_tracks": active_tracks,
         "confidence_threshold": candidate.threshold,
         "threshold": candidate.threshold,
         "region_of_interest": candidate.region_of_interest,
@@ -787,6 +796,17 @@ def validate_display_unit(unit: ProcessedDisplayUnit) -> None:
             model_id=decoded["model_id"],
             model_checksum=decoded["model_checksum"],
         )
+    _validate_active_tracks(
+        decoded.get("active_tracks"),
+        source_width=decoded["source_width"],
+        source_height=decoded["source_height"],
+        camera_id=decoded["camera_id"],
+        generation_number=decoded["generation_number"],
+        stream_epoch=decoded["stream_epoch"],
+        capture_session_id=decoded["capture_session_id"],
+        model_id=decoded["model_id"],
+        model_checksum=decoded["model_checksum"],
+    )
 
 
 def jpeg_dimensions(jpeg: bytes) -> tuple[int, int]:
@@ -861,6 +881,74 @@ def _validate_detection(
         or not 0 <= confidence_value <= 1
     ):
         raise DisplayProtocolError("processed detection geometry is invalid")
+
+
+def _validate_active_tracks(
+    value: object,
+    *,
+    source_width: int,
+    source_height: int,
+    camera_id: str,
+    generation_number: int,
+    stream_epoch: str,
+    capture_session_id: str,
+    model_id: str,
+    model_checksum: str,
+) -> None:
+    if not isinstance(value, list) or len(value) > MAX_DISPLAY_ACTIVE_TRACKS:
+        raise DisplayProtocolError("processed active tracks are invalid")
+    track_ids: set[int] = set()
+    for track in value:
+        if not isinstance(track, dict):
+            raise DisplayProtocolError("processed active track is invalid")
+        if (
+            not isinstance(track.get("camera_id"), str)
+            or not track["camera_id"]
+            or track.get("camera_id") != camera_id
+            or track.get("capture_session_id") != capture_session_id
+            or track.get("generation_number") != generation_number
+            or track.get("stream_epoch") != stream_epoch
+            or track.get("model_id") != model_id
+            or track.get("model_checksum") != model_checksum
+            or track.get("state") not in {"confirmed", "active"}
+            or type(track.get("track_id")) is not int
+            or track["track_id"] < 0
+            or track["track_id"] in track_ids
+            or type(track.get("last_frame_sequence")) is not int
+            or track["last_frame_sequence"] < 0
+            or type(track.get("observation_count")) is not int
+            or track["observation_count"] <= 0
+        ):
+            raise DisplayProtocolError("processed active track provenance is invalid")
+        box = track.get("last_box_xyxy")
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or not all(
+                isinstance(item, (int, float)) and not isinstance(item, bool) for item in box
+            )
+        ):
+            raise DisplayProtocolError("processed active track geometry is invalid")
+        x1, y1, x2, y2 = (float(item) for item in box)
+        if (
+            not all(np.isfinite((x1, y1, x2, y2)))
+            or not 0 <= x1 < x2 <= source_width
+            or not 0 <= y1 < y2 <= source_height
+        ):
+            raise DisplayProtocolError("processed active track geometry is invalid")
+        for name in ("last_confidence", "maximum_confidence"):
+            confidence = track.get(name)
+            if (
+                not isinstance(confidence, (int, float))
+                or isinstance(confidence, bool)
+                or not np.isfinite(float(confidence))
+                or not 0 <= float(confidence) <= 1
+            ):
+                raise DisplayProtocolError("processed active track confidence is invalid")
+        for name in ("first_seen_utc", "last_seen_utc"):
+            if not isinstance(track.get(name), str) or not track[name]:
+                raise DisplayProtocolError("processed active track timestamp is invalid")
+        track_ids.add(track["track_id"])
 
 
 def _validate_roi(value: object, *, source_width: int, source_height: int) -> None:

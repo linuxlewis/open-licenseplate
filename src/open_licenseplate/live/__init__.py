@@ -3,6 +3,7 @@
 from .display import (
     DISPLAY_BUFFER_CAPACITY,
     LIVE_PROTOCOL_VERSION,
+    MAX_DISPLAY_ACTIVE_TRACKS,
     MAX_RETIRED_PROVENANCES,
     DisplayBrokerMetrics,
     DisplayMessageTooLarge,
@@ -43,6 +44,7 @@ __all__ = [
     "DisplayShutdownError",
     "EpochFactory",
     "LIVE_PROTOCOL_VERSION",
+    "MAX_DISPLAY_ACTIVE_TRACKS",
     "MAX_RETIRED_PROVENANCES",
     "LiveFrameResult",
     "LivePipelineConflict",

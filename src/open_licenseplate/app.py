@@ -40,6 +40,7 @@ from .models.service import (
 from .paths import ManagedPaths
 from .redaction import redact_text
 from .settings_store import SettingsStore
+from .tracking import ClosedEventSink, TrackerFactory, TrackingConfig
 from .web import STATIC_DIRECTORY, render_page
 
 logger = logging.getLogger("open_licenseplate")
@@ -97,6 +98,9 @@ def create_app(
     *,
     source_factory: SourceFactory | None = None,
     inference_backend_factory: Callable[[], InferenceBackend] | None = None,
+    tracker_factory: TrackerFactory | None = None,
+    tracking_config: TrackingConfig | None = None,
+    event_sink: ClosedEventSink | None = None,
 ) -> FastAPI:
     """Create the application without starting a server."""
     effective_settings = settings or load_settings()
@@ -104,7 +108,13 @@ def create_app(
     effective_source_factory = source_factory or _default_source_factory
     camera_runtime = CameraRuntime(effective_source_factory)
     backend_factory = inference_backend_factory or CoreMLBackend
-    live_pipeline = LivePipelineCoordinator(camera_runtime, backend_factory)
+    live_pipeline = LivePipelineCoordinator(
+        camera_runtime,
+        backend_factory,
+        tracker_factory=tracker_factory,
+        tracking_config=tracking_config or TrackingConfig(),
+        event_sink=event_sink,
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:

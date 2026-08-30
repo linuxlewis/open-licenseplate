@@ -274,11 +274,19 @@ def test_m3_slow_inference_replaces_old_frames_and_keeps_latest_current() -> Non
         coordinator.wait_for_state("running")
         subscription = coordinator.subscribe_display()
         assert subscription is not None
+        deadline = time.monotonic() + 2
+        while coordinator._subscription is None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert coordinator._subscription is not None
         start_gate.set()
         assert inference_started.wait(5)
         hold_gate.wait_until_reached(1)
 
+        deadline = time.monotonic() + 2
         status = coordinator.status()
+        while status.metrics.inference_replacement_count == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+            status = coordinator.status()
         assert source.frames_emitted >= 64
         assert status.metrics.source_replacement_count > 0
         assert status.metrics.inference_replacement_count > 0

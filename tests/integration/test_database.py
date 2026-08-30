@@ -76,7 +76,7 @@ def test_fresh_database_migration_creates_settings_table(tmp_path: Path) -> None
 
     # An already current database must accept a second upgrade.
     upgrade_database(database_path)
-    assert database_status(database_path)["current_revision"] == "0003_models"
+    assert database_status(database_path)["current_revision"] == "0004_events_artifacts"
 
 
 def test_database_status_discovers_head_from_alembic_for_missing_database(

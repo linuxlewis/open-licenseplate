@@ -154,6 +154,27 @@ The capture package provides the M1 runtime:
 The preview encoder creates bounded MJPEG output from the newest decoded frame.
 The snapshot endpoint returns the newest frame as one JPEG.
 
+### M4-A tracking and event state
+
+The live pipeline uses a narrow `supervision` ByteTrack adapter behind an
+internal contract. Each validated detection carries camera, capture-session,
+generation, stream-epoch, frame, timestamp, model, and checksum provenance.
+The state machine confirms three matches in a short configurable window,
+expires short candidates, and closes confirmed tracks after one second without
+a match. A closed track emits one immutable in-memory aggregate. M4-A does
+not write the aggregate to SQLite; the later event transaction owns that work.
+
+The synchronized live display metadata includes bounded active-track records.
+It keeps the JSON header and JPEG pair unchanged and rejects stale or
+cross-provenance metadata. Run the replay and fake-clock checks with:
+
+```bash
+uv run pytest -m m4_a_acceptance -q -s
+uv run pytest tests/unit/test_tracking.py tests/integration/test_m4_migration.py -q -s
+```
+
+See `docs/m4-a-acceptance.md` for the fixture and expected results.
+
 ### Deterministic reconnect fixture
 
 The test suite keeps an in-memory fixture. It sends one frame, injects a decode

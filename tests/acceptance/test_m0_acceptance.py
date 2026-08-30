@@ -242,6 +242,9 @@ def test_m0_acceptance_from_fresh_fixture(tmp_path: Path, chromium) -> None:
         "application_settings",
         "cameras",
         "models",
+        "capture_sessions",
+        "detection_events",
+        "event_artifacts",
     }
     assert _setting_keys(database_path) == []
 
@@ -302,5 +305,8 @@ def test_m0_acceptance_from_fresh_fixture(tmp_path: Path, chromium) -> None:
         "application_settings",
         "cameras",
         "models",
+        "capture_sessions",
+        "detection_events",
+        "event_artifacts",
     }
     assert _setting_keys(database_path) == ["ui.density"]

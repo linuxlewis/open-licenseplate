@@ -139,6 +139,9 @@
     );
     document.querySelector("#live-processed-epoch").textContent = header.stream_epoch;
     document.querySelector("#live-processed-session").textContent = header.capture_session_id;
+    document.querySelector("#live-processed-active-tracks").textContent = formatCount(
+      header.active_tracks?.length,
+    );
   };
 
   const ensureOverlayCanvas = () => {
@@ -207,6 +210,26 @@
       context.fillText(label, x1 + 4, Math.max(13, y1 - 5));
       context.fillStyle = "#f5ca68";
     }
+    context.setLineDash([6, 4]);
+    context.strokeStyle = "#7dd3c7";
+    context.fillStyle = "#7dd3c7";
+    for (const track of currentHeader.active_tracks || []) {
+      const box = track.last_box_xyxy;
+      if (!Array.isArray(box) || box.length !== 4) {
+        continue;
+      }
+      const x1 = (Number(box[0]) / sourceWidth) * jpegWidth * (bounds.width / jpegWidth);
+      const y1 = (Number(box[1]) / sourceHeight) * jpegHeight * (bounds.height / jpegHeight);
+      const x2 = (Number(box[2]) / sourceWidth) * jpegWidth * (bounds.width / jpegWidth);
+      const y2 = (Number(box[3]) / sourceHeight) * jpegHeight * (bounds.height / jpegHeight);
+      if (![x1, y1, x2, y2].every((value) => Number.isFinite(value))) {
+        continue;
+      }
+      context.strokeRect(x1, y1, Math.max(0, x2 - x1), Math.max(0, y2 - y1));
+      context.fillStyle = "#7dd3c7";
+      context.fillText(`track ${track.track_id}`, x1 + 4, Math.max(13, y1 + 14));
+    }
+    context.setLineDash([]);
   };
 
   const validateState = (state) => {
@@ -293,6 +316,52 @@
     }
   };
 
+  const validateActiveTrack = (track, header) => {
+    if (
+      !track ||
+      typeof track.camera_id !== "string" ||
+      track.camera_id.length === 0 ||
+      track.capture_session_id !== header.capture_session_id ||
+      track.generation_number !== header.generation_number ||
+      track.stream_epoch !== header.stream_epoch ||
+      track.model_id !== header.model_id ||
+      track.model_checksum !== header.model_checksum ||
+      !["confirmed", "active"].includes(track.state) ||
+      !Number.isInteger(track.track_id) ||
+      track.track_id < 0 ||
+      !Array.isArray(track.last_box_xyxy) ||
+      track.last_box_xyxy.length !== 4 ||
+      !Number.isInteger(track.last_frame_sequence) ||
+      track.last_frame_sequence < 0 ||
+      !Number.isInteger(track.observation_count) ||
+      track.observation_count < 1 ||
+      !["last_confidence", "maximum_confidence"].every(
+        (name) =>
+          typeof track[name] === "number" &&
+          Number.isFinite(track[name]) &&
+          track[name] >= 0 &&
+          track[name] <= 1,
+      ) ||
+      !["first_seen_utc", "last_seen_utc"].every(
+        (name) => typeof track[name] === "string" && track[name].length > 0,
+      )
+    ) {
+      throw new Error("The processed active-track provenance is invalid.");
+    }
+    const [x1, y1, x2, y2] = track.last_box_xyxy.map(Number);
+    if (
+      ![x1, y1, x2, y2].every(Number.isFinite) ||
+      x1 < 0 ||
+      y1 < 0 ||
+      x1 >= x2 ||
+      y1 >= y2 ||
+      x2 > header.source_width ||
+      y2 > header.source_height
+    ) {
+      throw new Error("The processed active-track geometry is invalid.");
+    }
+  };
+
   const validateHeader = (header) => {
     if (
       !header ||
@@ -319,6 +388,9 @@
       header.jpeg_byte_count > 4 * 1024 * 1024
     ) {
       throw new Error("The processed display protocol is invalid.");
+    }
+    if (header.active_tracks === undefined) {
+      header.active_tracks = [];
     }
     for (const name of ["source_width", "source_height", "jpeg_width", "jpeg_height"]) {
       if (
@@ -355,6 +427,17 @@
     validateMetrics(header.metrics);
     for (const detection of header.detections) {
       validateDetection(detection, header);
+    }
+    if (!Array.isArray(header.active_tracks) || header.active_tracks.length > maxDetections) {
+      throw new Error("The processed active tracks are invalid.");
+    }
+    const trackIds = new Set();
+    for (const track of header.active_tracks) {
+      validateActiveTrack(track, header);
+      if (trackIds.has(track.track_id)) {
+        throw new Error("The processed active track IDs are invalid.");
+      }
+      trackIds.add(track.track_id);
     }
   };
 
