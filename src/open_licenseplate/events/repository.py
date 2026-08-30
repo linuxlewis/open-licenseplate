@@ -11,9 +11,13 @@ from typing import Any
 from sqlalchemy import Float, Integer, String, Text, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
+from ..cameras.repository import Camera
 from ..database import Database
+from ..models.repository import Model
 from ..settings_store import UTCDateTime
 from ..tracking.contracts import ClosedTrackEvent
+
+MAX_REVIEW_ARTIFACTS = 3
 
 
 class EventBase(DeclarativeBase):
@@ -131,6 +135,16 @@ class CommittedArtifact:
     quality_score: float
     quality_scoring_version: str
     quality_evidence: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class EventReview:
+    """Bounded event data used by the review API and browser."""
+
+    event: DetectionEvent
+    camera_display_name: str
+    model_display_name: str
+    artifacts: tuple[EventArtifact, ...]
 
 
 class EventRepository:
@@ -354,6 +368,109 @@ class EventRepository:
                 )
             )
 
+    def get_artifact(self, event_id: str, artifact_id: str) -> EventArtifact | None:
+        """Read one artifact only when it belongs to the requested event."""
+        with self.database.session() as session:
+            return session.scalar(
+                select(EventArtifact).where(
+                    EventArtifact.id == artifact_id,
+                    EventArtifact.event_id == event_id,
+                )
+            )
+
+    def review_event(self, event_id: str) -> EventReview | None:
+        """Read one bounded event review with safe provenance names."""
+        with self.database.session() as session:
+            event = session.get(DetectionEvent, event_id)
+            if event is None:
+                return None
+            camera_display_name = session.scalar(
+                select(Camera.name).where(Camera.id == event.camera_id)
+            )
+            model_display_name = session.scalar(
+                select(Model.display_name).where(Model.id == event.model_id)
+            )
+            artifacts = tuple(
+                session.scalars(
+                    select(EventArtifact)
+                    .where(EventArtifact.event_id == event_id)
+                    .order_by(
+                        EventArtifact.artifact_rank.asc(),
+                        EventArtifact.quality_score.desc(),
+                        EventArtifact.detection_confidence.desc(),
+                        EventArtifact.source_frame_sequence.asc(),
+                        EventArtifact.id.asc(),
+                    )
+                    .limit(MAX_REVIEW_ARTIFACTS)
+                )
+            )
+            return EventReview(
+                event=event,
+                camera_display_name=camera_display_name or "Unknown camera",
+                model_display_name=model_display_name or event.model_id,
+                artifacts=artifacts,
+            )
+
+    def list_reviews(self, *, limit: int = 100) -> list[EventReview]:
+        """Read a bounded newest-first event review slice."""
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("event limit must be between 1 and 1000")
+        with self.database.session() as session:
+            events = list(
+                session.scalars(
+                    select(DetectionEvent)
+                    .order_by(DetectionEvent.first_seen_at.desc(), DetectionEvent.id)
+                    .limit(limit)
+                )
+            )
+            if not events:
+                return []
+
+            event_ids = [event.id for event in events]
+            camera_names: dict[str, str] = {
+                camera_id: name
+                for camera_id, name in session.execute(
+                    select(Camera.id, Camera.name).where(
+                        Camera.id.in_({event.camera_id for event in events})
+                    )
+                ).all()
+            }
+            model_names: dict[str, str] = {
+                model_id: name
+                for model_id, name in session.execute(
+                    select(Model.id, Model.display_name).where(
+                        Model.id.in_({event.model_id for event in events})
+                    )
+                ).all()
+            }
+            artifacts_by_event: dict[str, list[EventArtifact]] = {
+                event_id: [] for event_id in event_ids
+            }
+            for artifact in session.scalars(
+                select(EventArtifact)
+                .where(EventArtifact.event_id.in_(event_ids))
+                .order_by(
+                    EventArtifact.event_id.asc(),
+                    EventArtifact.artifact_rank.asc(),
+                    EventArtifact.quality_score.desc(),
+                    EventArtifact.detection_confidence.desc(),
+                    EventArtifact.source_frame_sequence.asc(),
+                    EventArtifact.id.asc(),
+                )
+            ):
+                if len(artifacts_by_event[artifact.event_id]) < MAX_REVIEW_ARTIFACTS:
+                    artifacts_by_event[artifact.event_id].append(artifact)
+
+            return [
+                EventReview(
+                    event=event,
+                    camera_display_name=camera_names.get(event.camera_id, "Unknown camera"),
+                    model_display_name=model_names.get(event.model_id, event.model_id),
+                    artifacts=tuple(artifacts_by_event[event.id]),
+                )
+                for event in events
+            ]
+
     def managed_relative_paths(self) -> set[str]:
         """Return all stored paths for startup reconciliation."""
         with self.database.session() as session:
@@ -389,5 +506,7 @@ __all__ = [
     "CommittedArtifact",
     "DetectionEvent",
     "EventArtifact",
+    "EventReview",
     "EventRepository",
+    "MAX_REVIEW_ARTIFACTS",
 ]

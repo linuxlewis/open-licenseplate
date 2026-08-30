@@ -171,6 +171,23 @@ provenance as needed, inserts the event and artifact rows, and sets the best
 artifact ID. Duplicate closure for the same capture session and track is
 idempotent. M4 does not create durable processing jobs or OCR results.
 
+The M4-C review workflow is available at `/events`. It shows a bounded
+newest-first list and links to one event detail page. Detail pages show safe
+camera and model provenance, ranked crop metadata, verified crop thumbnails,
+and an explicit no-OCR state. Crop bytes are available only through
+`/api/v1/events/{event_id}/artifacts/{artifact_id}`. The route uses the
+database row as its allow-list, rejects traversal and symlink paths, verifies
+JPEG metadata and the stored SHA-256 checksum, and uses private no-store
+caching. It never returns a file path or image bytes in JSON.
+
+Run the M4-C workflow checks with:
+
+```bash
+uv run pytest tests/integration/test_m4_c_events.py -q
+uv run pytest tests/acceptance/test_m4_c_events_workflow.py -q
+uv run pytest -m m4_c_acceptance -q
+```
+
 The synchronized live display metadata includes bounded active-track records.
 It keeps the JSON header and JPEG pair unchanged and rejects stale or
 cross-provenance metadata. Run the replay and fake-clock checks with:

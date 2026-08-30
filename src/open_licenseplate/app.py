@@ -23,6 +23,7 @@ from .capture import CameraRuntime, PyAVRTSPSource, SourceFactory
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
 from .events import ManagedArtifactService
+from .events.api import router as event_api_router
 from .inference import CoreMLBackend, DetectorRegistry, InferenceBackend
 from .live import LivePipelineCoordinator
 from .live.api import router as live_api_router
@@ -42,7 +43,7 @@ from .paths import ManagedPaths
 from .redaction import redact_text
 from .settings_store import SettingsStore
 from .tracking import ClosedEventSink, TrackerFactory, TrackingConfig
-from .web import STATIC_DIRECTORY, render_page
+from .web import STATIC_DIRECTORY, build_page_context, render_page
 
 logger = logging.getLogger("open_licenseplate")
 CONTENT_SECURITY_POLICY = (
@@ -168,6 +169,7 @@ def create_app(
     application.include_router(camera_api_router)
     application.include_router(model_api_router)
     application.include_router(live_api_router)
+    application.include_router(event_api_router)
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(
@@ -208,7 +210,41 @@ def create_app(
 
     @application.get("/events", name="events_page", include_in_schema=False)
     async def events_page(request: Request) -> Any:
-        return render_page(request, effective_settings, paths, "events")
+        context = await asyncio.to_thread(
+            build_page_context,
+            request,
+            effective_settings,
+            paths,
+            "events",
+        )
+        return render_page(
+            request,
+            effective_settings,
+            paths,
+            "events",
+            context=context,
+        )
+
+    @application.get("/events/{event_id}", name="event_detail_page", include_in_schema=False)
+    async def event_detail_page(event_id: str, request: Request) -> Any:
+        try:
+            context = await asyncio.to_thread(
+                build_page_context,
+                request,
+                effective_settings,
+                paths,
+                "event_detail",
+                event_id=event_id,
+            )
+        except LookupError:
+            raise HTTPException(status_code=404, detail="event was not found") from None
+        return render_page(
+            request,
+            effective_settings,
+            paths,
+            "event_detail",
+            context=context,
+        )
 
     @application.get("/jobs", name="jobs_page", include_in_schema=False)
     async def jobs_page(request: Request) -> Any:

@@ -15,6 +15,7 @@ from .cameras.api import camera_payload
 from .cameras.repository import CameraRepository
 from .config import AppSettings
 from .database import Database, database_status
+from .events.api import _get_event_sync, _list_events_sync
 from .models.repository import ModelRepository, model_payload
 from .paths import ManagedPaths
 from .redaction import redact_text
@@ -37,6 +38,7 @@ class PageDefinition:
     empty_title: str = ""
     empty_description: str = ""
     planned_milestone: str = ""
+    nav: bool = True
 
 
 PAGES = (
@@ -66,7 +68,17 @@ PAGES = (
             "Events will appear after the live pipeline confirms a plate track. "
             "No event data is created by the application shell."
         ),
-        planned_milestone="M4",
+        planned_milestone="M4-C",
+    ),
+    PageDefinition(
+        key="event_detail",
+        label="Events",
+        path="/events",
+        eyebrow="Review",
+        title="Event review",
+        description="Inspect one confirmed plate appearance and its committed evidence.",
+        planned_milestone="M4-C",
+        nav=False,
     ),
     PageDefinition(
         key="jobs",
@@ -136,6 +148,7 @@ def _nav_items(active_key: str) -> list[dict[str, Any]]:
             "active": page.key == active_key,
         }
         for page in PAGES
+        if page.nav
     ]
 
 
@@ -335,6 +348,7 @@ def _context(
     settings: AppSettings,
     paths: ManagedPaths,
     active_key: str,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     database = _database_summary(paths)
     directories = paths.directory_checks()
@@ -347,12 +361,33 @@ def _context(
         if runtime_status.get("camera_id") in {camera["id"] for camera in cameras}
         else (cameras[0]["id"] if cameras else None)
     )
+    events: list[dict[str, Any]] = []
+    event_detail: dict[str, Any] | None = None
+    if database["status"] == "ok" and active_key == "events":
+        try:
+            events = _list_events_sync(paths, 100)["events"]
+        except Exception:
+            events = []
+    elif database["status"] == "ok" and active_key == "event_detail" and event_id:
+        try:
+            event_detail = _get_event_sync(paths, event_id)
+        except LookupError:
+            raise
+        except Exception:
+            event_detail = None
     return {
         "request": request,
         "app_name": settings.app_name,
         "app_version": __version__,
         "ui_density": settings.ui.density,
         "page": page,
+        "page_index": "M4"
+        if active_key in {"events", "event_detail"}
+        else (
+            "M3"
+            if active_key == "live"
+            else ("M2" if active_key == "models" else ("M1" if active_key == "cameras" else "M0"))
+        ),
         "nav_items": _nav_items(active_key),
         "global_status": _global_status(database, directories),
         "global_runtime": {
@@ -374,7 +409,21 @@ def _context(
         "live_status": live_status,
         "selected_camera_id": selected_camera_id,
         "selected_model_id": live_status.get("model_id"),
+        "events": events,
+        "event_detail": event_detail,
     }
+
+
+def build_page_context(
+    request: Request,
+    settings: AppSettings,
+    paths: ManagedPaths,
+    page_key: str,
+    *,
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    """Build page data so blocking review reads can run in a worker thread."""
+    return _context(request, settings, paths, page_key, event_id=event_id)
 
 
 def render_page(
@@ -382,12 +431,16 @@ def render_page(
     settings: AppSettings,
     paths: ManagedPaths,
     page_key: str,
+    *,
+    context: dict[str, Any] | None = None,
+    event_id: str | None = None,
 ) -> Response:
     """Render one shell page with Jinja autoescaping enabled."""
     if page_key not in PAGE_BY_KEY:
         raise ValueError(f"unknown shell page: {page_key}")
+    page_context = context or _context(request, settings, paths, page_key, event_id=event_id)
     return templates.TemplateResponse(
         request=request,
         name="page.html",
-        context=_context(request, settings, paths, page_key),
+        context=page_context,
     )
