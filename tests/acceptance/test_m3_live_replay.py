@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import threading
+import time
 import tracemalloc
 import weakref
 from datetime import UTC, datetime
@@ -466,12 +467,15 @@ def test_m3_one_hour_equivalent_replay_reports_metrics_and_stable_memory(
 
         for checkpoint in range(1, fixture.checkpoint_count + 1):
             checkpoints.wait_until_reached(checkpoint)
+            boundary = checkpoint * fixture.checkpoint_frames
+            unit = _get_unit_at_least(observer, boundary)
+            validate_display_unit(unit)
+            expected_has_detection = (checkpoint - 1) % 2 == 0
+            assert bool(json.loads(unit.metadata_text)["detections"]) is expected_has_detection
+            assert unit.frame_sequence >= boundary
             gc.collect()
             memory_samples.append(tracemalloc.get_traced_memory()[0])
-            unit = observer.get(timeout=5)
-            assert unit is not None
-            validate_display_unit(unit)
-            seen_detection_states.add(bool(json.loads(unit.metadata_text)["detections"]))
+            seen_detection_states.add(expected_has_detection)
             checkpoints.release(checkpoint)
 
         assert source.exhausted.wait(5)
@@ -637,11 +641,13 @@ def _get_unit_at_least(
     minimum_sequence: int,
 ) -> Any:
     """Drain older complete units until the current replay frame arrives."""
-    while True:
-        unit = subscription.get(timeout=5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        unit = subscription.get(timeout=max(0.0, deadline - time.monotonic()))
         assert unit is not None
         if unit.frame_sequence >= minimum_sequence:
             return unit
+    raise AssertionError(f"replay did not reach frame sequence {minimum_sequence}")
 
 
 def _get_unit_with_epoch(
@@ -649,9 +655,11 @@ def _get_unit_with_epoch(
     epoch: str,
 ) -> Any:
     """Drain complete units until the requested reconnect epoch arrives."""
-    while True:
-        unit = subscription.get(timeout=5)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        unit = subscription.get(timeout=max(0.0, deadline - time.monotonic()))
         assert unit is not None
         if unit.stream_epoch == epoch:
             return unit
         assert unit.stream_epoch == "reconnect-epoch-1"
+    raise AssertionError(f"replay did not reach epoch {epoch}")
