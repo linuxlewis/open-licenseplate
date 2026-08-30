@@ -52,6 +52,21 @@
   const maxActiveTracks = 64;
   const maxMetadataMetrics = 64;
 
+  const clearProcessedFrame = () => {
+    if (currentObjectUrl) {
+      URL.revokeObjectURL(currentObjectUrl);
+      currentObjectUrl = null;
+    }
+    processedPreview.removeAttribute("src");
+    currentHeader = null;
+    if (overlayCanvas) {
+      overlayCanvas.remove();
+      overlayCanvas = null;
+    }
+    processedFrame.hidden = true;
+    processedEmpty.hidden = false;
+  };
+
   const request = async (path, options = {}) => {
     const response = await fetch(path, {
       cache: "no-store",
@@ -66,6 +81,9 @@
   };
 
   const setProcessedState = (state) => {
+    if (state === "stopped") {
+      clearProcessedFrame();
+    }
     const title = document.querySelector("#live-processed-title");
     const stateField = document.querySelector("#live-processed-state");
     const label = state === "stopped" ? "Idle" : state.charAt(0).toUpperCase() + state.slice(1);
@@ -717,18 +735,7 @@
       const status = await request("/api/v1/live/stop", { method: "POST" });
       detectionActive = false;
       closeDisplaySocket();
-      if (currentObjectUrl) {
-        URL.revokeObjectURL(currentObjectUrl);
-        currentObjectUrl = null;
-      }
-      processedPreview.removeAttribute("src");
-      currentHeader = null;
-      if (overlayCanvas) {
-        overlayCanvas.remove();
-        overlayCanvas = null;
-      }
-      processedFrame.hidden = true;
-      processedEmpty.hidden = false;
+      clearProcessedFrame();
       updateLiveStatus(status);
       setMessage("Detection stopped. Camera and model resources are released.", "positive");
     } catch (error) {
