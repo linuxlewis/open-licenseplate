@@ -56,6 +56,7 @@ markers = [
     "m3_acceptance: the complete M3 live replay and lifecycle workflow",
     "m4_a_acceptance: the M4-A tracking and closed-event replay workflow",
     "m4_b_acceptance: the M4-B crop artifact and event transaction workflow",
+    "m4_c_acceptance: the M4-C event review and managed crop workflow",
 ]
 
 [tool.ruff]

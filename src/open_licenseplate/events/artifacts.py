@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path, PurePosixPath
@@ -18,9 +20,17 @@ from .. import __version__
 from ..database import Database
 from ..paths import ManagedPaths
 from ..tracking import CROP_QUALITY_SCORING_VERSION, ClosedTrackEvent, CropCandidate
-from .repository import CaptureSessionCreate, CommittedArtifact, DetectionEvent, EventRepository
+from .repository import (
+    CaptureSessionCreate,
+    CommittedArtifact,
+    DetectionEvent,
+    EventArtifact,
+    EventRepository,
+)
 
 MAX_COMMITTED_ARTIFACTS_PER_EVENT = 3
+MAX_ARTIFACT_BYTES = 16 * 1024 * 1024
+MAX_ARTIFACT_PIXELS = 262_144
 ARTIFACT_MIME_TYPE = "image/jpeg"
 ARTIFACT_EXTENSION = ".jpg"
 JPEG_QUALITY = 90
@@ -29,6 +39,10 @@ JPEG_SUBSAMPLING = 0
 
 class ArtifactCommitError(RuntimeError):
     """Raised when a crop artifact event cannot be committed safely."""
+
+
+class ArtifactUnavailable(RuntimeError):
+    """Raised when a committed artifact cannot be served safely."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +111,45 @@ class ManagedArtifactService:
             orphan_final_files_removed=orphan_removed,
             database_available=database_available,
         )
+
+    def read_committed_artifact(self, artifact: EventArtifact) -> bytes:
+        """Read and verify one committed JPEG without following links."""
+        filename = self._safe_artifact_filename(artifact)
+        root_fd = events_fd = file_fd = -1
+        try:
+            self._validate_root(self.paths.artifacts)
+            root_fd = _open_directory(self.paths.artifacts)
+            events_fd = _open_directory("events", dir_fd=root_fd)
+            file_fd = _open_file(filename, dir_fd=events_fd)
+            with os.fdopen(file_fd, "rb", closefd=True) as handle:
+                file_fd = -1
+                file_stat = os.fstat(handle.fileno())
+                if not stat.S_ISREG(file_stat.st_mode):
+                    raise ArtifactUnavailable
+                if file_stat.st_size != artifact.byte_size:
+                    raise ArtifactUnavailable
+                payload = handle.read(artifact.byte_size + 1)
+            if len(payload) != artifact.byte_size:
+                raise ArtifactUnavailable
+            self._verify_stored_artifact(payload, artifact)
+            return payload
+        except ArtifactUnavailable:
+            raise
+        except (ArtifactCommitError, OSError, OverflowError, ValueError, TypeError):
+            raise ArtifactUnavailable from None
+        finally:
+            for descriptor in (file_fd, events_fd, root_fd):
+                if descriptor >= 0:
+                    with suppress(OSError):
+                        os.close(descriptor)
+
+    def artifact_is_available(self, artifact: EventArtifact) -> bool:
+        """Return whether one committed artifact passes the serving checks."""
+        try:
+            self.read_committed_artifact(artifact)
+        except ArtifactUnavailable:
+            return False
+        return True
 
     def _commit_closed_event_locked(self, event: ClosedTrackEvent) -> DetectionEvent:
         database: Database | None = None
@@ -360,6 +413,46 @@ class ManagedArtifactService:
         self._validate_file_path(path, self.paths.artifacts)
         return path
 
+    @staticmethod
+    def _safe_artifact_filename(artifact: EventArtifact) -> str:
+        relative = artifact.managed_relative_path
+        if (
+            artifact.artifact_kind != "crop"
+            or artifact.mime_type != ARTIFACT_MIME_TYPE
+            or artifact.deleted_at is not None
+            or type(artifact.byte_size) is not int
+            or not 0 < artifact.byte_size <= MAX_ARTIFACT_BYTES
+            or type(artifact.width) is not int
+            or type(artifact.height) is not int
+            or not 0 < artifact.width <= 8192
+            or not 0 < artifact.height <= 8192
+            or artifact.width * artifact.height > MAX_ARTIFACT_PIXELS
+            or not isinstance(relative, str)
+        ):
+            raise ArtifactUnavailable
+        path = PurePosixPath(relative)
+        filename = f"{artifact.id}{ARTIFACT_EXTENSION}"
+        if path.parts != ("events", filename):
+            raise ArtifactUnavailable
+        return filename
+
+    @staticmethod
+    def _verify_stored_artifact(payload: bytes, artifact: EventArtifact) -> None:
+        if hashlib.sha256(payload).hexdigest() != artifact.sha256:
+            raise ArtifactUnavailable
+        try:
+            with Image.open(BytesIO(payload)) as image:
+                valid_image = image.format == "JPEG" and image.size == (
+                    artifact.width,
+                    artifact.height,
+                )
+                if valid_image:
+                    image.load()
+        except (OSError, SyntaxError, TypeError, ValueError):
+            raise ArtifactUnavailable from None
+        if not valid_image:
+            raise ArtifactUnavailable
+
     def _staging_path(self, event: ClosedTrackEvent, artifact_id: str) -> Path:
         directory_id = uuid5(
             NAMESPACE_URL,
@@ -543,9 +636,11 @@ EventArtifactService = ManagedArtifactService
 
 
 __all__ = [
+    "MAX_ARTIFACT_BYTES",
     "ARTIFACT_EXTENSION",
     "ARTIFACT_MIME_TYPE",
     "ArtifactCommitError",
+    "ArtifactUnavailable",
     "CROP_QUALITY_SCORING_VERSION",
     "EventArtifactService",
     "JPEG_QUALITY",
@@ -554,3 +649,13 @@ __all__ = [
     "ManagedArtifactService",
     "ReconciliationReport",
 ]
+
+
+def _open_directory(path: str | Path, *, dir_fd: int | None = None) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags, dir_fd=dir_fd)
+
+
+def _open_file(path: str, *, dir_fd: int) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags, dir_fd=dir_fd)

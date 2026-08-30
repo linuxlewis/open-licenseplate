@@ -937,6 +937,212 @@ body.density-compact .status-item {
   color: var(--ink);
 }
 
+.event-list-card {
+  padding-bottom: 12px;
+}
+
+.event-list {
+  display: grid;
+  gap: 10px;
+}
+
+.event-row {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(245, 240, 231, 0.56);
+}
+
+.event-thumbnail,
+.crop-image {
+  position: relative;
+  display: grid;
+  min-height: 96px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #152124;
+}
+
+.event-thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 96px;
+  object-fit: cover;
+}
+
+.event-row-main {
+  min-width: 0;
+}
+
+.event-row-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.event-row h3 {
+  margin: 5px 0 0;
+  font-family: var(--font-display);
+  font-size: 25px;
+  font-weight: 500;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+
+.event-row h3 a {
+  text-decoration-color: rgba(223, 93, 80, 0.36);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 4px;
+}
+
+.event-row h3 a:hover,
+.event-row h3 a:focus-visible {
+  color: var(--accent-dark);
+}
+
+.event-confidence {
+  flex: 0 0 auto;
+  color: var(--teal);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.event-time {
+  margin: 9px 0 13px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.event-time span {
+  margin: 0 4px;
+  color: var(--accent);
+}
+
+.event-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.event-facts span {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  background: rgba(255, 253, 248, 0.58);
+}
+
+.event-facts .break-code {
+  overflow-wrap: anywhere;
+}
+
+.event-detail-actions {
+  margin: -8px 0 18px;
+}
+
+.text-link {
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 800;
+  text-underline-offset: 4px;
+}
+
+.text-link:hover,
+.text-link:focus-visible {
+  color: var(--ink);
+}
+
+.event-detail-layout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.event-summary-card,
+.event-provenance-card,
+.event-ocr-card,
+.event-crops-card {
+  min-width: 0;
+}
+
+.no-ocr-state {
+  max-width: 720px;
+  margin: 0;
+  padding: 15px 17px;
+  border-left: 3px solid var(--gold);
+  color: #795729;
+  font-size: 14px;
+  background: #f7ead6;
+}
+
+.crop-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.crop-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(245, 240, 231, 0.56);
+}
+
+.crop-image {
+  min-height: 170px;
+  margin-bottom: 15px;
+}
+
+.crop-image img {
+  display: block;
+  width: 100%;
+  height: 170px;
+  object-fit: contain;
+}
+
+.crop-rank {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 5px 7px;
+  border: 1px solid rgba(255, 253, 248, 0.3);
+  border-radius: 999px;
+  color: var(--paper-strong);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  background: rgba(23, 35, 39, 0.78);
+}
+
+.artifact-unavailable {
+  padding: 10px;
+  color: #f7ead6;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.crop-card .detail-row {
+  grid-template-columns: minmax(65px, 0.7fr) minmax(0, 1.3fr);
+}
+
 .quiet-button {
   min-height: 40px;
   padding: 0 13px;
@@ -1268,6 +1474,26 @@ code {
 
   .empty-copy p {
     font-size: 14px;
+  }
+
+  .event-row {
+    grid-template-columns: 1fr;
+  }
+
+  .event-thumbnail {
+    min-height: 150px;
+  }
+
+  .event-thumbnail img {
+    min-height: 150px;
+  }
+
+  .event-detail-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .crop-grid {
+    grid-template-columns: 1fr;
   }
 
   .status-strip {
