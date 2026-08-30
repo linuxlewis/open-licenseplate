@@ -51,6 +51,7 @@ class _PreparedArtifact:
 
 
 DatabaseFactory = Callable[[Path], Database]
+DirectoryFsync = Callable[[Path], None]
 
 
 class ManagedArtifactService:
@@ -68,10 +69,12 @@ class ManagedArtifactService:
         *,
         application_version: str = __version__,
         database_factory: DatabaseFactory = Database,
+        directory_fsync: DirectoryFsync | None = None,
     ) -> None:
         self.paths = paths
         self.application_version = application_version
         self._database_factory = database_factory
+        self._directory_fsync = directory_fsync or _fsync_directory
         self._commit_lock = threading.Lock()
 
     def commit_closed_event(self, event: ClosedTrackEvent) -> DetectionEvent:
@@ -185,6 +188,7 @@ class ManagedArtifactService:
             record = CommittedArtifact(
                 id=artifact_id,
                 event_id=event.event_id,
+                artifact_rank=rank,
                 artifact_kind="crop",
                 managed_relative_path=relative_path.as_posix(),
                 sha256=sha256,
@@ -259,6 +263,13 @@ class ManagedArtifactService:
             except OSError:
                 raise ArtifactCommitError("crop artifact rename failed") from None
             _verify_payload(item.final_path, item.payload, item.record)
+        self._sync_directory(final_root)
+        for staging_directory in sorted(
+            {item.staging_path.parent for item in prepared},
+            key=lambda path: path.as_posix(),
+        ):
+            self._sync_directory(staging_directory)
+        self._sync_directory(self.paths.staging)
 
     def _recover_failed_commit(
         self,
@@ -297,6 +308,8 @@ class ManagedArtifactService:
                     continue
         for item in prepared:
             self._remove_empty_parents(item.staging_path.parent, self.paths.staging)
+        self._best_effort_sync(self.paths.staging)
+        self._best_effort_sync(self.paths.artifacts / "events")
 
     def _remove_staging_entries(self) -> int:
         removed = 0
@@ -456,6 +469,18 @@ class ManagedArtifactService:
                 files.extend(cls._walk_files(entry))
         return files
 
+    def _sync_directory(self, path: Path) -> None:
+        try:
+            self._directory_fsync(path)
+        except Exception:
+            raise ArtifactCommitError("artifact directory durability sync failed") from None
+
+    def _best_effort_sync(self, path: Path) -> None:
+        try:
+            self._directory_fsync(path)
+        except Exception:
+            return
+
 
 def _encode_jpeg(candidate: CropCandidate) -> tuple[bytes, int, int]:
     if candidate.pixels is None:
@@ -504,6 +529,14 @@ def _verify_payload(path: Path, payload: bytes, record: CommittedArtifact) -> No
         or not valid_dimensions
     ):
         raise ArtifactCommitError("committed crop checksum or metadata did not verify")
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 EventArtifactService = ManagedArtifactService

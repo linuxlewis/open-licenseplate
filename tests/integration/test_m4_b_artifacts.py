@@ -5,7 +5,7 @@ import json
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 import pytest
@@ -77,6 +77,12 @@ class _RenameFails(ManagedArtifactService):
     def _rename_artifacts(self, prepared, repository) -> None:
         super()._rename_artifacts(prepared[:1], repository)
         raise ArtifactCommitError("injected rename failure")
+
+
+class _StageFails(ManagedArtifactService):
+    def _stage_artifacts(self, prepared) -> None:
+        del prepared
+        raise ArtifactCommitError("injected staging failure")
 
 
 def _live_settings(tmp_path: Path):
@@ -264,20 +270,42 @@ def test_event_and_three_artifacts_commit_together_and_restart_is_readable(tmp_p
         artifacts = repository.artifacts_for_event(stored.id)
         assert len(artifacts) == 3
         assert stored.best_artifact_id == artifacts[0].id
+        assert [artifact.artifact_rank for artifact in artifacts] == [0, 1, 2]
         assert all(
             item.quality_scoring_version == CROP_QUALITY_SCORING_VERSION for item in artifacts
         )
         for artifact in artifacts:
+            relative_path = PurePosixPath(artifact.managed_relative_path)
+            assert not relative_path.is_absolute()
+            assert relative_path.parts[0] == "events"
             path = paths.artifacts / artifact.managed_relative_path
+            assert path.resolve().is_relative_to(paths.artifacts.resolve())
+            assert artifact.artifact_kind == "crop"
+            assert artifact.mime_type == "image/jpeg"
             payload = path.read_bytes()
             assert hashlib.sha256(payload).hexdigest() == artifact.sha256
             assert len(payload) == artifact.byte_size
             with Image.open(path) as image:
                 assert image.size == (artifact.width, artifact.height)
                 assert image.format == "JPEG"
-            assert json.loads(artifact.quality_evidence_json)["components"]
+            source_candidate = next(
+                item
+                for item in candidates
+                if item.source_frame_sequence == artifact.source_frame_sequence
+            )
+            assert artifact.source_timestamp == source_candidate.source_timestamp
+            assert artifact.detection_confidence == pytest.approx(
+                source_candidate.detection_confidence
+            )
+            assert artifact.quality_score == pytest.approx(source_candidate.quality_score)
+            assert artifact.quality_scoring_version == source_candidate.quality_scoring_version
+            evidence = json.loads(artifact.quality_evidence_json)
+            assert evidence["components"]
+            assert evidence["plate_width_px"] == source_candidate.plate_width_px
+            assert evidence["plate_height_px"] == source_candidate.plate_height_px
     finally:
         database.dispose()
+    assert all(candidate.pixels is None for candidate in candidates)
 
     restarted = Database(paths.database)
     try:
@@ -286,6 +314,49 @@ def test_event_and_three_artifacts_commit_together_and_restart_is_readable(tmp_p
         assert len(EventRepository(restarted).artifacts_for_event(stored.id)) == 3
     finally:
         restarted.dispose()
+
+
+def test_tied_scores_use_the_persisted_selection_order(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    candidates = tuple(_candidate(sequence, 0.8, 100) for sequence in (3, 1, 2))
+    stored = ManagedArtifactService(paths, application_version="test").commit_closed_event(
+        _event(candidates=candidates)
+    )
+
+    database = Database(paths.database)
+    try:
+        artifacts = EventRepository(database).artifacts_for_event(stored.id)
+        assert [artifact.source_frame_sequence for artifact in artifacts] == [1, 2, 3]
+        assert [artifact.artifact_rank for artifact in artifacts] == [0, 1, 2]
+        assert stored.best_artifact_id == artifacts[0].id
+        assert len({artifact.quality_score for artifact in artifacts}) == 1
+    finally:
+        database.dispose()
+
+
+def test_final_directory_durability_runs_before_database_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    order: list[tuple[str, Path | None]] = []
+    original_commit = EventRepository.commit_closed_event
+
+    def record_commit(repository, *args, **kwargs):
+        order.append(("database", None))
+        return original_commit(repository, *args, **kwargs)
+
+    monkeypatch.setattr(EventRepository, "commit_closed_event", record_commit)
+    service = ManagedArtifactService(
+        paths,
+        directory_fsync=lambda path: order.append(("fsync", path)),
+    )
+    service.commit_closed_event(_event(candidates=(_candidate(1, 0.9, 50),)))
+
+    final_directory = paths.artifacts / "events"
+    final_sync = order.index(("fsync", final_directory))
+    database_commit = order.index(("database", None))
+    assert final_sync < database_commit
 
 
 def test_real_closed_track_path_commits_durable_event(tmp_path: Path) -> None:
@@ -349,7 +420,9 @@ def test_real_closed_track_path_commits_durable_event(tmp_path: Path) -> None:
         repository = EventRepository(database)
         events = repository.list()
         assert len(events) == 1
-        assert len(repository.artifacts_for_event(events[0].id)) <= 3
+        artifacts = repository.artifacts_for_event(events[0].id)
+        assert 1 <= len(artifacts) <= 3
+        assert events[0].best_artifact_id == artifacts[0].id
     finally:
         database.dispose()
 
@@ -431,6 +504,27 @@ def test_database_failure_cleans_final_files_and_rows(
         database.dispose()
     assert not tuple((paths.artifacts / "events").glob("*"))
     assert not tuple(paths.staging.rglob("*"))
+
+
+def test_staging_failure_cleans_files_and_rows(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    service = _StageFails(paths, application_version="test")
+    candidates = tuple(_candidate(i, 0.8, 50) for i in (1, 2, 3))
+
+    with pytest.raises(ArtifactCommitError):
+        service.commit_closed_event(_event(candidates=candidates))
+
+    database = Database(paths.database)
+    try:
+        repository = EventRepository(database)
+        assert repository.list() == []
+        assert repository.managed_relative_paths() == set()
+    finally:
+        database.dispose()
+    events_root = paths.artifacts / "events"
+    assert not events_root.exists()
+    assert not tuple(paths.staging.rglob("*"))
+    assert all(candidate.pixels is None for candidate in candidates)
 
 
 def test_rename_failure_cleans_partial_final_set(tmp_path: Path) -> None:

@@ -70,6 +70,7 @@ class EventArtifact(EventBase):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     event_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    artifact_rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     artifact_kind: Mapped[str] = mapped_column(String(64), nullable=False)
     managed_relative_path: Mapped[str] = mapped_column(Text, nullable=False)
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -116,6 +117,7 @@ class CommittedArtifact:
 
     id: str
     event_id: str
+    artifact_rank: int
     artifact_kind: str
     managed_relative_path: str
     sha256: str
@@ -259,6 +261,7 @@ class EventRepository:
                 EventArtifact(
                     id=artifact.id,
                     event_id=artifact.event_id,
+                    artifact_rank=artifact.artifact_rank,
                     artifact_kind=artifact.artifact_kind,
                     managed_relative_path=artifact.managed_relative_path,
                     sha256=artifact.sha256,
@@ -342,6 +345,7 @@ class EventRepository:
                     select(EventArtifact)
                     .where(EventArtifact.event_id == event_id)
                     .order_by(
+                        EventArtifact.artifact_rank.asc(),
                         EventArtifact.quality_score.desc(),
                         EventArtifact.detection_confidence.desc(),
                         EventArtifact.source_frame_sequence.asc(),

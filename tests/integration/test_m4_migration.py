@@ -77,7 +77,7 @@ def _closed_event(*, event_id: str, track_id: int) -> ClosedTrackEvent:
 def test_m4_migration_upgrades_empty_and_0003_and_downgrades_cleanly(tmp_path: Path) -> None:
     database_path = _database_path(tmp_path)
     upgrade_database(database_path)
-    assert database_status(database_path)["current_revision"] == "0004_events_artifacts"
+    assert database_status(database_path)["current_revision"] == "0005_m4b_artifact_metadata"
 
     database = Database(database_path)
     try:
@@ -95,7 +95,39 @@ def test_m4_migration_upgrades_empty_and_0003_and_downgrades_cleanly(tmp_path: P
             config = _alembic_config(database)
             config.attributes["connection"] = connection
             command.upgrade(config, "head")
+        assert database_status(database_path)["current_revision"] == "0005_m4b_artifact_metadata"
+    finally:
+        database.dispose()
+
+
+@pytest.mark.integration
+@pytest.mark.m4_b_acceptance
+def test_m4b_migration_upgrades_an_existing_0004_database(tmp_path: Path) -> None:
+    database_path = _database_path(tmp_path)
+    database = Database(database_path)
+    try:
+        with database.engine.begin() as connection:
+            config = _alembic_config(database)
+            config.attributes["connection"] = connection
+            command.upgrade(config, "0004_events_artifacts")
         assert database_status(database_path)["current_revision"] == "0004_events_artifacts"
+        with database.connection() as connection:
+            old_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(event_artifacts)"))
+            }
+        assert "artifact_rank" not in old_columns
+        assert "quality_evidence_json" not in old_columns
+
+        with database.engine.begin() as connection:
+            config = _alembic_config(database)
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+        assert database_status(database_path)["current_revision"] == "0005_m4b_artifact_metadata"
+        with database.connection() as connection:
+            new_columns = {
+                row[1] for row in connection.execute(text("PRAGMA table_info(event_artifacts)"))
+            }
+        assert {"artifact_rank", "quality_evidence_json"} <= new_columns
     finally:
         database.dispose()
 

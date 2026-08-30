@@ -10,7 +10,10 @@ evidence with each artifact row.
 Crop artifacts use JPEG with quality `90`, `4:4:4` subsampling, and disabled
 optimization and progressive output. Files are written below the managed
 `artifacts/events` directory. Staging uses the managed `staging` directory and
-an atomic same-filesystem rename. SQLite stores only the relative path.
+an atomic same-filesystem rename. The final artifact directory and the staging
+directory are fsynced before the SQLite transaction starts. SQLite stores only
+the relative path. Each artifact stores an explicit zero-based rank so the
+read seam uses the same order as selection.
 
 ## Transaction checks
 
@@ -36,6 +39,7 @@ uv run pytest tests/unit/test_tracking.py tests/integration/test_m4_migration.py
 ```
 
 The focused tests cover stable scorer fixtures, candidate limits and release,
-JPEG metadata and checksum verification, one-transaction persistence,
-duplicate-close idempotence, database failure cleanup, and startup
+staging and rename failure cleanup, directory durability ordering, JPEG
+metadata and checksum verification, one-transaction persistence, tied-score
+ordering, duplicate-close idempotence, database failure cleanup, and startup
 reconciliation.
