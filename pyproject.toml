@@ -22,6 +22,7 @@ dependencies = [
     "python-multipart>=0.0.20,<1",
     "Pillow>=11,<13",
     "sqlalchemy>=2.0,<3",
+    "supervision>=0.26,<0.31",
     "uvicorn>=0.32,<1",
     "websockets>=13,<16",
     "PyYAML>=6.0,<7",
@@ -53,6 +54,7 @@ markers = [
     "m0_acceptance: the complete M0 operator workflow",
     "m2_acceptance: the complete M2 still-image workflow",
     "m3_acceptance: the complete M3 live replay and lifecycle workflow",
+    "m4_a_acceptance: the M4-A tracking and closed-event replay workflow",
 ]
 
 [tool.ruff]

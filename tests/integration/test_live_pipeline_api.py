@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +13,12 @@ from open_licenseplate.app import create_app
 from open_licenseplate.capture import FixtureAttempt, ReconnectFixture, make_preview_frame
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import upgrade_database
+from open_licenseplate.inference import Detection
 from open_licenseplate.inference.backends import FakeBackend
+from open_licenseplate.tracking import (
+    TrackedDetection,
+    TrackingConfig,
+)
 
 
 def _settings(tmp_path: Path) -> Any:
@@ -169,6 +174,64 @@ def test_live_api_starts_warms_processes_updates_threshold_and_stops(
         assert stopped.json()["state"] == "stopped"
         assert fixture.sources and fixture.sources[0].closed.is_set()
         assert backend.closes and all(model.closed for model in backend.closes)
+
+
+def test_live_pipeline_exposes_active_track_and_emits_one_close_on_stop(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    fixture = _source_fixture()
+    backend = FakeBackend(output_factory=_outputs)
+    closed_events: list = []
+
+    class OneTrack:
+        def update(
+            self,
+            detections: Sequence[Detection],
+            *,
+            frame_width: int,
+            frame_height: int,
+        ) -> tuple[TrackedDetection, ...]:
+            assert (frame_width, frame_height) == (8, 6)
+            return tuple(TrackedDetection(7, detection) for detection in detections)
+
+        def reset(self) -> None:
+            return None
+
+    with TestClient(
+        create_app(
+            settings,
+            source_factory=fixture,
+            inference_backend_factory=lambda: backend,
+            tracker_factory=lambda: OneTrack(),
+            tracking_config=TrackingConfig(close_timeout_seconds=1.0),
+            event_sink=closed_events.append,
+        )
+    ) as client:
+        camera_id = _create_camera(client, "Fixture")
+        model_id = _import_and_validate(client, tmp_path, "tracking-model")
+        assert (
+            client.post(
+                "/api/v1/live/start",
+                json={"camera_id": camera_id, "model_id": model_id},
+            ).status_code
+            == 200
+        )
+        deadline = time.monotonic() + 2
+        state = client.get("/api/v1/live/state").json()
+        while state["metrics"]["processed_frames"] < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+            state = client.get("/api/v1/live/state").json()
+        assert state["metrics"]["processed_frames"] >= 3
+        assert state["active_tracks"][0]["state"] == "active"
+        assert state["active_tracks"][0]["observation_count"] >= 3
+        assert "recent_closed_events" not in state
+
+        stopped = client.post("/api/v1/live/stop")
+        assert stopped.status_code == 200
+        assert len(closed_events) == 1
+        assert closed_events[0].event_state == "closed"
 
 
 def test_live_generation_metrics_exclude_existing_preview_frames(tmp_path: Path) -> None:

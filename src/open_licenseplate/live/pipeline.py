@@ -36,6 +36,16 @@ from ..inference import (
     PreprocessingError,
     StillImage,
 )
+from ..tracking import (
+    ActiveTrack,
+    ClosedTrackEvent,
+    LiveDetectionFrame,
+    TrackerFactory,
+    TrackingConfig,
+    TrackingEventAggregator,
+    TrackingProvenance,
+    default_tracker_factory,
+)
 from .display import (
     DisplayShutdownError,
     ProcessedDisplayService,
@@ -46,6 +56,7 @@ from .display import (
 PipelineState = Literal["stopped", "starting", "warming", "running", "stopping", "failed"]
 BackendFactory = Callable[[], InferenceBackend]
 EpochFactory = Callable[[], str]
+EventSink = Callable[[ClosedTrackEvent], None]
 
 
 class LivePipelineError(RuntimeError):
@@ -186,6 +197,7 @@ class LiveFrameResult:
     source_width: int
     source_height: int
     detections: tuple[Detection, ...]
+    active_tracks: tuple[ActiveTrack, ...]
     rejected_candidates: int
 
     @property
@@ -207,6 +219,7 @@ class LiveFrameResult:
             "source_width": self.source_width,
             "source_height": self.source_height,
             "detections": [_detection_payload(detection) for detection in self.detections],
+            "active_tracks": [track.as_dict() for track in self.active_tracks],
             "rejected_candidates": self.rejected_candidates,
         }
 
@@ -229,6 +242,7 @@ class LivePipelineStatus:
     failure: LivePipelineFailure | None
     metrics: LivePipelineMetrics
     last_result: LiveFrameResult | None
+    active_tracks: tuple[ActiveTrack, ...]
     camera: dict[str, Any] | None
     state_history: tuple[PipelineState, ...]
 
@@ -262,6 +276,7 @@ class LivePipelineStatus:
             "last_error": None if self.failure is None else self.failure.message,
             "metrics": self.metrics.as_dict(),
             "last_result": None if self.last_result is None else self.last_result.as_dict(),
+            "active_tracks": [track.as_dict() for track in self.active_tracks],
             "camera_state": camera.get("state"),
             "source": source,
             "camera": safe_camera,
@@ -297,6 +312,9 @@ class LivePipelineCoordinator:
     stop_timeout_seconds: float = 5.0
     epoch_factory: EpochFactory = lambda: uuid4().hex
     display_max_fps: float = 10.0
+    tracker_factory: TrackerFactory | None = None
+    tracking_config: TrackingConfig = field(default_factory=TrackingConfig)
+    event_sink: EventSink | None = None
 
     def __post_init__(self) -> None:
         if self.poll_interval_seconds <= 0:
@@ -316,6 +334,8 @@ class LivePipelineCoordinator:
         self._epoch: str | None = None
         self._frame_sequence: int | None = None
         self._last_result: LiveFrameResult | None = None
+        self._active_tracks: tuple[ActiveTrack, ...] = ()
+        self._recent_closed_events: deque[ClosedTrackEvent] = deque(maxlen=16)
         self._failure: LivePipelineFailure | None = None
         self._metrics = LivePipelineMetrics()
         self._completed_at: deque[float] = deque(maxlen=120)
@@ -323,6 +343,17 @@ class LivePipelineCoordinator:
         self._display = ProcessedDisplayService(
             max_fps=self.display_max_fps,
             on_error=self._display_failed,
+        )
+        factory = self.tracker_factory or (
+            lambda: default_tracker_factory(
+                max_active_tracks=self.tracking_config.max_active_tracks,
+            )
+        )
+        self._tracking = TrackingEventAggregator(
+            factory,
+            clock=self.clock,
+            config=self.tracking_config,
+            on_closed_event=self._record_closed_event,
         )
 
     @property
@@ -348,6 +379,17 @@ class LivePipelineCoordinator:
         """Return the model selected by the current generation."""
         with self._condition:
             return None if self._generation is None else self._generation.descriptor.model_id
+
+    @property
+    def closed_events(self) -> tuple[ClosedTrackEvent, ...]:
+        """Return the bounded recent closed-event view for tests and the live UI."""
+        with self._condition:
+            return tuple(self._recent_closed_events)
+
+    @property
+    def tracking(self) -> TrackingEventAggregator:
+        """Return the tracking contract owned by this live coordinator."""
+        return self._tracking
 
     def start(
         self,
@@ -422,6 +464,7 @@ class LivePipelineCoordinator:
             if self._state in {"starting", "warming", "running", "stopping"}:
                 raise LivePipelineConflict("stop the active live pipeline before starting again")
 
+            self._tracking.reset()
             self._generation_number += 1
             generation = _PipelineGeneration(
                 number=self._generation_number,
@@ -441,6 +484,7 @@ class LivePipelineCoordinator:
             self._epoch = None
             self._frame_sequence = None
             self._last_result = None
+            self._active_tracks = ()
             self._failure = None
             self._metrics = LivePipelineMetrics()
             self._completed_at.clear()
@@ -516,6 +560,7 @@ class LivePipelineCoordinator:
                 generation.camera_id,
                 wait_timeout,
             )
+            self._reset_tracking()
             if not camera_ok:
                 self._record_stop_failure()
                 raise LivePipelineShutdownError("camera resources did not stop before the deadline")
@@ -523,7 +568,8 @@ class LivePipelineCoordinator:
                 raise LivePipelineShutdownError(
                     "processed display resources did not stop before the deadline"
                 )
-            return result
+            with self._condition:
+                return self._status_locked()
 
         if subscription is not None:
             subscription.close()
@@ -561,6 +607,7 @@ class LivePipelineCoordinator:
             raise LivePipelineShutdownError(
                 "processed display resources did not stop before the deadline"
             )
+        self._reset_tracking()
         with self._condition:
             return self._status_locked()
 
@@ -625,6 +672,19 @@ class LivePipelineCoordinator:
                         model_load_ms=_nonnegative(warmup.model_load_ms),
                         warmup_ms=_nonnegative(warmup_ms),
                     )
+            while not generation.stop_requested.is_set() and subscription is None:
+                subscription = self._ensure_subscription(generation, subscription)
+                if subscription is not None:
+                    break
+                camera_status = self.camera_runtime.status(generation.camera_id)
+                if camera_status.state == "failed":
+                    raise _WorkerFailure(
+                        "capture",
+                        "camera capture failed; check the camera settings and connection",
+                    )
+                generation.stop_requested.wait(self.poll_interval_seconds)
+            if generation.stop_requested.is_set():
+                return
             self._set_state(generation, "running")
 
             last_session_id: str | None = None
@@ -638,6 +698,7 @@ class LivePipelineCoordinator:
                             "capture",
                             "camera capture failed; check the camera settings and connection",
                         )
+                    self._tick_tracking(generation)
                     generation.stop_requested.wait(self.poll_interval_seconds)
                     continue
 
@@ -645,9 +706,27 @@ class LivePipelineCoordinator:
                 if frame is None:
                     if subscription.closed:
                         subscription = None
+                    self._tick_tracking(generation)
                     continue
                 if not self._frame_matches_camera(generation, frame):
                     raise _WorkerFailure("capture", "camera frame provenance is invalid")
+                camera_status = self.camera_runtime.status(generation.camera_id)
+                source_info = camera_status.source_info
+                if (
+                    source_info is not None
+                    and frame.capture_session_id != source_info.session.capture_session_id
+                ) or (
+                    source_info is None
+                    and last_session_id is not None
+                    and frame.capture_session_id != last_session_id
+                ):
+                    with self._condition:
+                        if self._is_current_locked(generation):
+                            self._metrics = replace(
+                                self._metrics,
+                                stale_frame_count=self._metrics.stale_frame_count + 1,
+                            )
+                    continue
                 if frame.capture_session_id != last_session_id:
                     last_session_id = frame.capture_session_id
                     last_sequence = None
@@ -662,6 +741,20 @@ class LivePipelineCoordinator:
                                     frame.capture_session_id,
                                 )
                             self._frame_sequence = None
+                            stream_epoch = self._epoch
+                        else:
+                            stream_epoch = None
+                    if stream_epoch is not None:
+                        update = self._tracking.activate_provenance(
+                            self._tracking_provenance(
+                                generation,
+                                frame.capture_session_id,
+                                stream_epoch,
+                            )
+                        )
+                        with self._condition:
+                            if self._is_current_locked(generation):
+                                self._active_tracks = update.active_tracks
                 if last_sequence is not None and frame.sequence <= last_sequence:
                     with self._condition:
                         if self._is_current_locked(generation):
@@ -766,6 +859,24 @@ class LivePipelineCoordinator:
             0.0,
             (completed_monotonic - frame.host_received_monotonic) * 1000,
         )
+        with self._condition:
+            stream_epoch = self._epoch
+        if stream_epoch is None:
+            raise _WorkerFailure("capture", "live stream provenance is not available")
+        tracking_update = self._tracking.consume(
+            LiveDetectionFrame(
+                provenance=self._tracking_provenance(
+                    generation,
+                    frame.capture_session_id,
+                    stream_epoch,
+                ),
+                frame_sequence=frame.sequence,
+                captured_at=frame.host_received_at,
+                frame_width=frame.width,
+                frame_height=frame.height,
+                detections=detections.detections,
+            )
+        )
         self._completed_at.append(completed_monotonic)
         processed_fps = _processed_fps(self._completed_at)
         camera_status = self.camera_runtime.status(generation.camera_id)
@@ -789,10 +900,12 @@ class LivePipelineCoordinator:
                 source_width=frame.width,
                 source_height=frame.height,
                 detections=detections.detections,
+                active_tracks=tracking_update.active_tracks,
                 rejected_candidates=detections.rejected_count,
             )
             self._frame_sequence = frame.sequence
             self._last_result = result
+            self._active_tracks = tracking_update.active_tracks
             self._prediction_samples_ms.append(_nonnegative(run.inference_ms))
             prediction_p50_ms = _percentile(self._prediction_samples_ms, 0.50)
             prediction_p95_ms = _percentile(self._prediction_samples_ms, 0.95)
@@ -834,6 +947,7 @@ class LivePipelineCoordinator:
                 capture_session_id=result.capture_session_id,
                 stream_epoch=result.stream_epoch,
                 detections=result.detections,
+                active_tracks=result.active_tracks,
                 threshold=threshold,
                 region_of_interest=(
                     None
@@ -843,6 +957,35 @@ class LivePipelineCoordinator:
                 metrics=self._metrics.as_dict(),
             )
         self._display.submit(candidate)
+
+    @staticmethod
+    def _tracking_provenance(
+        generation: _PipelineGeneration,
+        capture_session_id: str,
+        stream_epoch: str,
+    ) -> TrackingProvenance:
+        """Build one validated tracking provenance value."""
+        return TrackingProvenance(
+            camera_id=generation.camera_id,
+            capture_session_id=capture_session_id,
+            generation_number=generation.number,
+            stream_epoch=stream_epoch,
+            model_id=generation.descriptor.model_id,
+            model_checksum=generation.descriptor.artifact_sha256,
+        )
+
+    def _tick_tracking(self, generation: _PipelineGeneration) -> None:
+        """Run timeout expiry even when capture temporarily has no frame."""
+        update = self._tracking.tick()
+        with self._condition:
+            if self._is_current_locked(generation):
+                self._active_tracks = update.active_tracks
+
+    def _reset_tracking(self) -> None:
+        """Close confirmed tracks and clear the bounded state at a boundary."""
+        update = self._tracking.reset()
+        with self._condition:
+            self._active_tracks = update.active_tracks
 
     def _frame_matches_camera(self, generation: _PipelineGeneration, frame: VideoFrame) -> bool:
         camera_status = self.camera_runtime.status(generation.camera_id)
@@ -929,6 +1072,17 @@ class LivePipelineCoordinator:
             failure_count=self._metrics.failure_count + 1,
         )
 
+    def _record_closed_event(self, event: ClosedTrackEvent) -> None:
+        """Keep a bounded recent view and isolate optional consumers."""
+        with self._condition:
+            self._recent_closed_events.append(event)
+        if self.event_sink is not None:
+            try:
+                self.event_sink(event)
+            except Exception:
+                # Event persistence is deliberately outside this milestone.
+                return
+
     def _is_current_locked(self, generation: _PipelineGeneration) -> bool:
         return self._generation is generation and generation.number == self._generation_number
 
@@ -990,6 +1144,7 @@ class LivePipelineCoordinator:
             failure=self._failure,
             metrics=metrics,
             last_result=self._last_result,
+            active_tracks=self._active_tracks,
             camera=camera_payload,
             state_history=tuple(self._state_history),
         )

@@ -429,7 +429,15 @@ def test_browser_can_run_detection_change_threshold_resize_overlay_and_stop(
 
 
 @pytest.mark.browser
-@pytest.mark.parametrize("message_order", ["header_header_binary", "unexpected_binary"])
+@pytest.mark.parametrize(
+    "message_order",
+    [
+        "header_header_binary",
+        "unexpected_binary",
+        "wrong_track_camera",
+        "too_many_active_tracks",
+    ],
+)
 def test_browser_rejects_invalid_processed_message_order(
     fake_live_browser_base_url: str,
     chromium,
@@ -509,6 +517,23 @@ def test_browser_rejects_invalid_processed_message_order(
         "roi": None,
         "metrics": {},
     }
+    active_track = {
+        "camera_id": "camera-2",
+        "capture_session_id": "session-1",
+        "generation_number": 1,
+        "stream_epoch": "epoch-1",
+        "model_id": "model-1",
+        "model_checksum": "a" * 64,
+        "track_id": 1,
+        "state": "active",
+        "first_seen_utc": "2026-08-29T00:00:00Z",
+        "last_seen_utc": "2026-08-29T00:00:00Z",
+        "last_frame_sequence": 1,
+        "last_box_xyxy": [1, 1, 5, 4],
+        "last_confidence": 0.9,
+        "observation_count": 3,
+        "maximum_confidence": 0.9,
+    }
     header_text = json.dumps(header)
     if message_order == "header_header_binary":
         page.evaluate(
@@ -518,6 +543,20 @@ def test_browser_rejects_invalid_processed_message_order(
               window.__mockSocket.emit(new Uint8Array([1]).buffer);
             }""",
             header_text,
+        )
+    elif message_order == "wrong_track_camera":
+        header["active_tracks"] = [active_track]
+        page.evaluate(
+            "(header) => window.__mockSocket.emit(JSON.stringify(header))",
+            json.dumps(header),
+        )
+    elif message_order == "too_many_active_tracks":
+        header["active_tracks"] = [
+            {**active_track, "camera_id": "camera-1", "track_id": index} for index in range(65)
+        ]
+        page.evaluate(
+            "(header) => window.__mockSocket.emit(JSON.stringify(header))",
+            json.dumps(header),
         )
     else:
         page.evaluate(
