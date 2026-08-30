@@ -52,6 +52,7 @@ markers = [
     "macos: tests that require macOS or Apple Silicon runtime support",
     "m0_acceptance: the complete M0 operator workflow",
     "m2_acceptance: the complete M2 still-image workflow",
+    "m3_acceptance: the complete M3 live replay and lifecycle workflow",
 ]
 
 [tool.ruff]

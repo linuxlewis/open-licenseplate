@@ -25,6 +25,7 @@ MAX_DISPLAY_DIMENSION = 8192
 MAX_DISPLAY_DETECTIONS = 256
 MAX_DISPLAY_SUBSCRIBERS = 16
 MAX_RETIRED_PROVENANCES = 16
+DISPLAY_BUFFER_CAPACITY = 1
 
 
 class DisplayProtocolError(ValueError):
@@ -95,6 +96,8 @@ class DisplayBrokerMetrics:
 
 class ProcessedDisplayBroker:
     """Capacity-one broker that stores complete display units only."""
+
+    capacity = DISPLAY_BUFFER_CAPACITY
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -206,6 +209,8 @@ class ProcessedDisplayBroker:
 class ProcessedDisplaySubscription:
     """Capacity-one downstream view of complete display units."""
 
+    capacity = DISPLAY_BUFFER_CAPACITY
+
     def __init__(self, parent: ProcessedDisplayBroker) -> None:
         self._parent = parent
         self._condition = threading.Condition()
@@ -283,6 +288,8 @@ class ProcessedDisplaySubscription:
 
 class _CandidateBroker:
     """Private capacity-one broker for frames waiting for JPEG encoding."""
+
+    capacity = DISPLAY_BUFFER_CAPACITY
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -915,6 +922,7 @@ def _remaining(deadline: float | None) -> float | None:
 
 __all__ = [
     "DisplayBrokerMetrics",
+    "DISPLAY_BUFFER_CAPACITY",
     "DisplayMessageTooLarge",
     "DisplayProtocolError",
     "DisplayShutdownError",

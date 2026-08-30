@@ -275,6 +275,29 @@ M3-A does not include the detection WebSocket, JPEG display units, browser
 overlays, tracking, event storage, or long replay tests. It uses fake source
 and backend fixtures for portable lifecycle and no-backlog tests.
 
+### M3-C live replay acceptance
+
+M3-C adds deterministic acceptance coverage for the complete live path. The
+tests check slow-inference frame replacement, capacity-one source and
+inference delivery, paired processed JSON/JPEG units, stale generation and
+capture-session rejection, reconnect and stop/restart resource ownership, and
+no-plate versus plate detection evidence. They do not create tracks, events,
+crops, artifacts, jobs, or OCR results.
+
+Run the portable M3 acceptance set with:
+
+```bash
+uv run pytest -m m3_acceptance -q -s
+```
+
+The accelerated replay covers 3,600 logical seconds with 3,600 synthetic
+frames. It records processed FPS, prediction P50/P95, replacement counters,
+and current traced memory at 12 stable checkpoints. The memory rule is a
+2 MiB tolerance above the first two-checkpoint baseline for 3 consecutive
+checkpoints. The test does not wait one hour and does not assert unsupported
+hardware performance. See `docs/m3-acceptance.md` for the optional Apple
+Silicon live Core ML fixture command and the browser regression command.
+
 ### Empty development fixture
 
 Create a clean directory layout for local M0 work with:

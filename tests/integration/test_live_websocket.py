@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from model_helpers import create_model_fixture
@@ -79,6 +80,7 @@ def _wait_for_processed(client: TestClient) -> None:
     raise AssertionError("live pipeline did not process a frame")
 
 
+@pytest.mark.m3_acceptance
 def test_live_websocket_sends_one_header_then_matching_jpeg(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")

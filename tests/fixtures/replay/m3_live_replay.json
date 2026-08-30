@@ -1,0 +1,13 @@
+{
+  "fixture_id": "m3-synthetic-road-v1",
+  "width": 64,
+  "height": 48,
+  "frame_rate": 30.0,
+  "background_value": 24,
+  "plate_value": 224,
+  "plate_box": [16, 18, 48, 30],
+  "one_hour_frames": 3600,
+  "checkpoint_frames": 300,
+  "memory_tolerance_bytes": 2097152,
+  "sustained_growth_checkpoints": 3
+}

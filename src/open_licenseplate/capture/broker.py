@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from .contracts import VideoFrame
 
 MAX_SUBSCRIBERS = 16
+LATEST_FRAME_CAPACITY = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +31,8 @@ class BrokerMetrics:
 
 class LatestFrameBroker:
     """Thread-safe capacity-one storage that always favors the newest frame."""
+
+    capacity = LATEST_FRAME_CAPACITY
 
     def __init__(self) -> None:
         self._condition = threading.Condition()
@@ -168,6 +171,8 @@ class LatestFrameBroker:
 
 class LatestFrameSubscription:
     """Capacity-one downstream view of a latest-frame broker."""
+
+    capacity = LATEST_FRAME_CAPACITY
 
     def __init__(self, parent: LatestFrameBroker) -> None:
         self._parent = parent
