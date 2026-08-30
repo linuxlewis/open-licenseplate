@@ -243,7 +243,6 @@ class LivePipelineStatus:
     metrics: LivePipelineMetrics
     last_result: LiveFrameResult | None
     active_tracks: tuple[ActiveTrack, ...]
-    recent_closed_events: tuple[ClosedTrackEvent, ...]
     camera: dict[str, Any] | None
     state_history: tuple[PipelineState, ...]
 
@@ -278,7 +277,6 @@ class LivePipelineStatus:
             "metrics": self.metrics.as_dict(),
             "last_result": None if self.last_result is None else self.last_result.as_dict(),
             "active_tracks": [track.as_dict() for track in self.active_tracks],
-            "recent_closed_events": [event.as_dict() for event in self.recent_closed_events],
             "camera_state": camera.get("state"),
             "source": source,
             "camera": safe_camera,
@@ -338,7 +336,6 @@ class LivePipelineCoordinator:
         self._last_result: LiveFrameResult | None = None
         self._active_tracks: tuple[ActiveTrack, ...] = ()
         self._recent_closed_events: deque[ClosedTrackEvent] = deque(maxlen=16)
-        self._retired_capture_sessions: deque[str] = deque(maxlen=16)
         self._failure: LivePipelineFailure | None = None
         self._metrics = LivePipelineMetrics()
         self._completed_at: deque[float] = deque(maxlen=120)
@@ -492,7 +489,6 @@ class LivePipelineCoordinator:
             self._metrics = LivePipelineMetrics()
             self._completed_at.clear()
             self._prediction_samples_ms.clear()
-            self._retired_capture_sessions.clear()
             self._state_history = deque(["stopped"], maxlen=32)
             self._transition_locked("starting")
         try:
@@ -676,7 +672,19 @@ class LivePipelineCoordinator:
                         model_load_ms=_nonnegative(warmup.model_load_ms),
                         warmup_ms=_nonnegative(warmup_ms),
                     )
-            subscription = self._ensure_subscription(generation, subscription)
+            while not generation.stop_requested.is_set() and subscription is None:
+                subscription = self._ensure_subscription(generation, subscription)
+                if subscription is not None:
+                    break
+                camera_status = self.camera_runtime.status(generation.camera_id)
+                if camera_status.state == "failed":
+                    raise _WorkerFailure(
+                        "capture",
+                        "camera capture failed; check the camera settings and connection",
+                    )
+                generation.stop_requested.wait(self.poll_interval_seconds)
+            if generation.stop_requested.is_set():
+                return
             self._set_state(generation, "running")
 
             last_session_id: str | None = None
@@ -702,17 +710,24 @@ class LivePipelineCoordinator:
                     continue
                 if not self._frame_matches_camera(generation, frame):
                     raise _WorkerFailure("capture", "camera frame provenance is invalid")
+                camera_status = self.camera_runtime.status(generation.camera_id)
+                source_info = camera_status.source_info
+                if (
+                    source_info is not None
+                    and frame.capture_session_id != source_info.session.capture_session_id
+                ) or (
+                    source_info is None
+                    and last_session_id is not None
+                    and frame.capture_session_id != last_session_id
+                ):
+                    with self._condition:
+                        if self._is_current_locked(generation):
+                            self._metrics = replace(
+                                self._metrics,
+                                stale_frame_count=self._metrics.stale_frame_count + 1,
+                            )
+                    continue
                 if frame.capture_session_id != last_session_id:
-                    if frame.capture_session_id in self._retired_capture_sessions:
-                        with self._condition:
-                            if self._is_current_locked(generation):
-                                self._metrics = replace(
-                                    self._metrics,
-                                    stale_frame_count=self._metrics.stale_frame_count + 1,
-                                )
-                        continue
-                    if last_session_id is not None:
-                        self._retired_capture_sessions.append(last_session_id)
                     last_session_id = frame.capture_session_id
                     last_sequence = None
                     with self._condition:
@@ -726,6 +741,20 @@ class LivePipelineCoordinator:
                                     frame.capture_session_id,
                                 )
                             self._frame_sequence = None
+                            stream_epoch = self._epoch
+                        else:
+                            stream_epoch = None
+                    if stream_epoch is not None:
+                        update = self._tracking.activate_provenance(
+                            self._tracking_provenance(
+                                generation,
+                                frame.capture_session_id,
+                                stream_epoch,
+                            )
+                        )
+                        with self._condition:
+                            if self._is_current_locked(generation):
+                                self._active_tracks = update.active_tracks
                 if last_sequence is not None and frame.sequence <= last_sequence:
                     with self._condition:
                         if self._is_current_locked(generation):
@@ -830,15 +859,16 @@ class LivePipelineCoordinator:
             0.0,
             (completed_monotonic - frame.host_received_monotonic) * 1000,
         )
+        with self._condition:
+            stream_epoch = self._epoch
+        if stream_epoch is None:
+            raise _WorkerFailure("capture", "live stream provenance is not available")
         tracking_update = self._tracking.consume(
             LiveDetectionFrame(
-                provenance=TrackingProvenance(
-                    camera_id=generation.camera_id,
-                    capture_session_id=frame.capture_session_id,
-                    generation_number=generation.number,
-                    stream_epoch=self._epoch or "",
-                    model_id=generation.descriptor.model_id,
-                    model_checksum=generation.descriptor.artifact_sha256,
+                provenance=self._tracking_provenance(
+                    generation,
+                    frame.capture_session_id,
+                    stream_epoch,
                 ),
                 frame_sequence=frame.sequence,
                 captured_at=frame.host_received_at,
@@ -927,6 +957,22 @@ class LivePipelineCoordinator:
                 metrics=self._metrics.as_dict(),
             )
         self._display.submit(candidate)
+
+    @staticmethod
+    def _tracking_provenance(
+        generation: _PipelineGeneration,
+        capture_session_id: str,
+        stream_epoch: str,
+    ) -> TrackingProvenance:
+        """Build one validated tracking provenance value."""
+        return TrackingProvenance(
+            camera_id=generation.camera_id,
+            capture_session_id=capture_session_id,
+            generation_number=generation.number,
+            stream_epoch=stream_epoch,
+            model_id=generation.descriptor.model_id,
+            model_checksum=generation.descriptor.artifact_sha256,
+        )
 
     def _tick_tracking(self, generation: _PipelineGeneration) -> None:
         """Run timeout expiry even when capture temporarily has no frame."""
@@ -1099,7 +1145,6 @@ class LivePipelineCoordinator:
             metrics=metrics,
             last_result=self._last_result,
             active_tracks=self._active_tracks,
-            recent_closed_events=tuple(self._recent_closed_events),
             camera=camera_payload,
             state_history=tuple(self._state_history),
         )

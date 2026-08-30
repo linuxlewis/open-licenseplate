@@ -49,6 +49,7 @@
     typeof value === "number" && Number.isFinite(value) ? String(Math.max(0, value)) : "0";
   const maxDimension = 8192;
   const maxDetections = 256;
+  const maxActiveTracks = 64;
   const maxMetadataMetrics = 64;
 
   const request = async (path, options = {}) => {
@@ -321,6 +322,7 @@
       !track ||
       typeof track.camera_id !== "string" ||
       track.camera_id.length === 0 ||
+      track.camera_id !== header.camera_id ||
       track.capture_session_id !== header.capture_session_id ||
       track.generation_number !== header.generation_number ||
       track.stream_epoch !== header.stream_epoch ||
@@ -428,7 +430,7 @@
     for (const detection of header.detections) {
       validateDetection(detection, header);
     }
-    if (!Array.isArray(header.active_tracks) || header.active_tracks.length > maxDetections) {
+    if (!Array.isArray(header.active_tracks) || header.active_tracks.length > maxActiveTracks) {
       throw new Error("The processed active tracks are invalid.");
     }
     const trackIds = new Set();

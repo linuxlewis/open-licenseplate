@@ -13,6 +13,8 @@ from open_licenseplate.database import Database, database_status, upgrade_databa
 from open_licenseplate.events import CaptureSessionCreate, EventRepository
 from open_licenseplate.tracking import ClosedTrackEvent, TrackingProvenance
 
+pytestmark = pytest.mark.m4_a_acceptance
+
 
 def _database_path(tmp_path: Path) -> Path:
     return tmp_path / "data" / "events.sqlite3"
@@ -117,11 +119,21 @@ def test_m4_schema_has_foreign_keys_indexes_and_durable_uniqueness(tmp_path: Pat
             )
         )
         repository = EventRepository(database)
-        repository.create_closed_event(_closed_event(event_id="event-1", track_id=7))
+        repository.create_closed_event(
+            _closed_event(event_id="event-1", track_id=7),
+            crop_ranking_version="m4-test",
+        )
         with pytest.raises(IntegrityError):
-            repository.create_closed_event(_closed_event(event_id="event-2", track_id=7))
+            repository.create_closed_event(
+                _closed_event(event_id="event-2", track_id=7),
+                crop_ranking_version="m4-test",
+            )
 
         with database.connection() as connection:
+            event_column_nullability = {
+                row[1]: row[3]
+                for row in connection.execute(text("PRAGMA table_info(detection_events)"))
+            }
             event_foreign_keys = {
                 row[2]
                 for row in connection.execute(text("PRAGMA foreign_key_list(detection_events)"))
@@ -169,5 +181,6 @@ def test_m4_schema_has_foreign_keys_indexes_and_durable_uniqueness(tmp_path: Pat
     assert "cameras" in event_foreign_keys
     assert "models" in event_foreign_keys
     assert "detection_events" in artifact_foreign_keys
+    assert event_column_nullability["crop_ranking_version"] == 1
     assert "ix_detection_events_first_seen_at" in indexes
     assert "ix_event_artifacts_event_id" in indexes

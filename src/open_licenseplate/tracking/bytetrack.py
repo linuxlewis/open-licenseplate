@@ -9,6 +9,8 @@ import numpy as np
 from ..inference.contract import Detection
 from .contracts import TrackedDetection, TrackerAdapter
 
+SOURCE_INDEX_KEY = "open_licenseplate_source_index"
+
 
 class ByteTrackUnavailableError(RuntimeError):
     """Raised when the optional ByteTrack runtime cannot be loaded."""
@@ -80,15 +82,29 @@ class SupervisionByteTrackAdapter:
                 dtype=np.float32,
             ),
             class_id=np.asarray([detection.class_id for detection in detections], dtype=np.int32),
+            data={
+                SOURCE_INDEX_KEY: np.arange(
+                    len(detections),
+                    dtype=np.int32,
+                )
+            },
         )
         tracked = self._tracker.update_with_detections(source)
         self._trim_removed_tracks()
         tracker_ids = tracked.tracker_id
-        if tracker_ids is None:
+        source_indices = tracked.data.get(SOURCE_INDEX_KEY)
+        if tracker_ids is None or source_indices is None:
             return ()
         results: list[TrackedDetection] = []
         for output_index, raw_track_id in enumerate(tracker_ids):
-            if raw_track_id is None or output_index >= len(detections):
+            if (
+                raw_track_id is None
+                or output_index >= len(source_indices)
+                or source_indices[output_index] is None
+            ):
+                continue
+            source_index = int(source_indices[output_index])
+            if source_index < 0 or source_index >= len(detections):
                 continue
             track_id = int(raw_track_id)
             if track_id < 0:
@@ -96,7 +112,7 @@ class SupervisionByteTrackAdapter:
             results.append(
                 TrackedDetection(
                     track_id=track_id,
-                    detection=detections[output_index],
+                    detection=detections[source_index],
                 )
             )
         return tuple(results)

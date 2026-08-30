@@ -226,6 +226,7 @@ def test_live_pipeline_exposes_active_track_and_emits_one_close_on_stop(
         assert state["metrics"]["processed_frames"] >= 3
         assert state["active_tracks"][0]["state"] == "active"
         assert state["active_tracks"][0]["observation_count"] >= 3
+        assert "recent_closed_events" not in state
 
         stopped = client.post("/api/v1/live/stop")
         assert stopped.status_code == 200

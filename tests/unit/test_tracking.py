@@ -16,6 +16,8 @@ from open_licenseplate.tracking import (
     TrackingProvenance,
 )
 
+pytestmark = pytest.mark.m4_a_acceptance
+
 
 @dataclass
 class FakeClock:
@@ -204,9 +206,10 @@ def test_provenance_boundary_closes_old_track_and_rejects_stale_frame() -> None:
         aggregator.consume(_frame(clock, sequence))
         clock.advance(0.1)
 
-    new_session = aggregator.consume(_frame(clock, 1, session="session-2"))
-    assert len(new_session.closed_events) == 1
-    assert new_session.closed_events[0].capture_session_id == "session-1"
+    activation = aggregator.activate_provenance(_provenance(session="session-2", epoch="epoch-2"))
+    assert len(activation.closed_events) == 1
+    assert activation.closed_events[0].capture_session_id == "session-1"
+    new_session = aggregator.consume(_frame(clock, 1, session="session-2", epoch="epoch-2"))
     assert new_session.active_tracks == ()
 
     stale = aggregator.consume(_frame(clock, 99, session="session-1"))
@@ -214,6 +217,23 @@ def test_provenance_boundary_closes_old_track_and_rejects_stale_frame() -> None:
     assert stale.stale is True
     assert stale.closed_events == ()
     assert aggregator.tracker.reset_count == 1
+
+
+@pytest.mark.integration
+def test_first_session_stays_stale_after_more_than_bounded_boundary_count() -> None:
+    clock = FakeClock()
+    aggregator = _aggregator(clock)
+    aggregator.consume(_frame(clock, 1, session="session-1"))
+
+    for index in range(2, 19):
+        session = f"session-{index}"
+        aggregator.activate_provenance(_provenance(session=session, epoch=f"epoch-{index}"))
+        update = aggregator.consume(_frame(clock, 1, session=session, epoch=f"epoch-{index}"))
+        assert update.accepted is True
+
+    stale = aggregator.consume(_frame(clock, 99, session="session-1"))
+    assert stale.accepted is False
+    assert stale.stale is True
 
 
 @pytest.mark.integration
@@ -226,6 +246,9 @@ def test_reset_and_repeated_ticks_do_not_duplicate_close() -> None:
 
     first = aggregator.reset()
     assert len(first.closed_events) == 1
+    stale = aggregator.consume(_frame(clock, 99))
+    assert stale.accepted is False
+    assert stale.stale is True
     assert aggregator.reset().closed_events == ()
     assert aggregator.tick().closed_events == ()
 

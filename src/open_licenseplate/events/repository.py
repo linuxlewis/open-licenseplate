@@ -61,7 +61,7 @@ class DetectionEvent(EventBase):
     maximum_confidence: Mapped[float] = mapped_column(Float, nullable=False)
     event_state: Mapped[str] = mapped_column(String(32), nullable=False)
     best_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    crop_ranking_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    crop_ranking_version: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
 
@@ -125,8 +125,15 @@ class EventRepository:
             session.expunge(row)
         return row
 
-    def create_closed_event(self, event: ClosedTrackEvent) -> DetectionEvent:
+    def create_closed_event(
+        self,
+        event: ClosedTrackEvent,
+        *,
+        crop_ranking_version: str = "m4-a-none",
+    ) -> DetectionEvent:
         """Insert one aggregate and leave uniqueness to SQLite."""
+        if not crop_ranking_version.strip():
+            raise ValueError("crop_ranking_version is required")
         now = datetime.now(UTC)
         row = DetectionEvent(
             id=event.event_id,
@@ -141,6 +148,7 @@ class EventRepository:
             observation_count=event.observation_count,
             maximum_confidence=event.maximum_confidence,
             event_state=event.event_state,
+            crop_ranking_version=crop_ranking_version,
             created_at=now,
             updated_at=now,
         )

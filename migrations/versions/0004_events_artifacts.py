@@ -59,7 +59,7 @@ def upgrade() -> None:
         sa.Column("maximum_confidence", sa.Float(), nullable=False),
         sa.Column("event_state", sa.String(length=32), nullable=False),
         sa.Column("best_artifact_id", sa.String(length=36), nullable=True),
-        sa.Column("crop_ranking_version", sa.String(length=64), nullable=True),
+        sa.Column("crop_ranking_version", sa.String(length=64), nullable=False),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.Text(), nullable=False),
         sa.ForeignKeyConstraint(

@@ -28,7 +28,6 @@ class TrackingConfig:
     confirmation_window_seconds: float = 0.75
     close_timeout_seconds: float = 1.0
     max_active_tracks: int = 64
-    max_retired_provenances: int = 16
     max_closed_track_keys: int = 128
 
     def __post_init__(self) -> None:
@@ -42,7 +41,6 @@ class TrackingConfig:
                 raise ValueError(f"{field_name} must be positive and finite")
         for value, field_name in (
             (self.max_active_tracks, "max_active_tracks"),
-            (self.max_retired_provenances, "max_retired_provenances"),
             (self.max_closed_track_keys, "max_closed_track_keys"),
         ):
             if type(value) is not int or value < 1:
@@ -87,11 +85,9 @@ class TrackingEventAggregator:
         self._tracker = tracker_factory()
         self._on_closed_event = on_closed_event
         self._provenance: TrackingProvenance | None = None
+        self._requires_activation = False
         self._last_frame_sequence: int | None = None
         self._tracks: dict[tuple[str, int], _TrackState] = {}
-        self._retired_provenances: deque[TrackingProvenance] = deque(
-            maxlen=self.config.max_retired_provenances
-        )
         self._closed_track_keys: deque[tuple[str, int]] = deque(
             maxlen=self.config.max_closed_track_keys
         )
@@ -114,13 +110,21 @@ class TrackingEventAggregator:
 
     def consume(self, frame: LiveDetectionFrame) -> TrackingUpdate:
         """Process one validated frame and emit any timeout closures."""
-        provenance_events = self._switch_provenance(frame.provenance)
-        if provenance_events is None:
+        if self._requires_activation:
             return TrackingUpdate(
                 active_tracks=self.active_tracks,
                 accepted=False,
                 stale=True,
             )
+        if self._provenance is None:
+            self._provenance = frame.provenance
+        elif frame.provenance != self._provenance:
+            return TrackingUpdate(
+                active_tracks=self.active_tracks,
+                accepted=False,
+                stale=True,
+            )
+
         if (
             self._last_frame_sequence is not None
             and frame.frame_sequence <= self._last_frame_sequence
@@ -144,7 +148,7 @@ class TrackingEventAggregator:
             matched_track_ids.add(match.track_id)
             self._apply_match(frame, match)
         closed_events = self._expire(self._clock.monotonic())
-        return self._update(provenance_events + closed_events)
+        return self._update(closed_events)
 
     def tick(self) -> TrackingUpdate:
         """Expire candidates and confirmed tracks using the injected clock."""
@@ -153,37 +157,31 @@ class TrackingEventAggregator:
 
     def reset(self) -> TrackingUpdate:
         """Close confirmed tracks once and clear all tracker state."""
-        if self._provenance is not None:
-            self._retired_provenances.append(self._provenance)
-        closed_events = tuple(
-            self._close_track(key)
-            for key, track in tuple(self._tracks.items())
-            if track.state in {"confirmed", "active"}
-        )
+        closed_events = self._close_confirmed_tracks()
         self._tracks.clear()
         self._last_frame_sequence = None
         self._provenance = None
+        self._requires_activation = True
         self._tracker.reset()
-        return self._update(tuple(event for event in closed_events if event is not None))
+        return self._update(closed_events)
 
     def close(self) -> TrackingUpdate:
         """Release tracker state without retaining a closed-event history."""
         return self.reset()
 
-    def _switch_provenance(
-        self,
-        provenance: TrackingProvenance,
-    ) -> tuple[ClosedTrackEvent, ...] | None:
-        current = self._provenance
-        if current is None:
-            self._provenance = provenance
-            return ()
-        if provenance == current:
-            return ()
-        if provenance in self._retired_provenances:
-            return None
-        if provenance.generation_number < current.generation_number:
-            return None
+    def activate_provenance(self, provenance: TrackingProvenance) -> TrackingUpdate:
+        """Trust and activate a new provenance boundary supplied by the coordinator."""
+        if not self._requires_activation and provenance == self._provenance:
+            return self._update(())
+        closed_events = self._close_confirmed_tracks()
+        self._tracks.clear()
+        self._last_frame_sequence = None
+        self._provenance = provenance
+        self._requires_activation = False
+        self._tracker.reset()
+        return self._update(closed_events)
+
+    def _close_confirmed_tracks(self) -> tuple[ClosedTrackEvent, ...]:
         closed_events = tuple(
             event
             for key, track in tuple(self._tracks.items())
@@ -191,11 +189,6 @@ class TrackingEventAggregator:
             for event in (self._close_track(key),)
             if event is not None
         )
-        self._retired_provenances.append(current)
-        self._provenance = provenance
-        self._last_frame_sequence = None
-        self._tracks.clear()
-        self._tracker.reset()
         return closed_events
 
     def _apply_match(self, frame: LiveDetectionFrame, match: TrackedDetection) -> None:

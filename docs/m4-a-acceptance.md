@@ -33,6 +33,7 @@ Run the state-machine and migration checks:
 
 ```bash
 uv run pytest \
+  tests/unit/test_bytetrack.py \
   tests/unit/test_tracking.py \
   tests/integration/test_m4_migration.py \
   -q -s
@@ -49,6 +50,6 @@ The tests use a fake UTC and monotonic clock. They check:
 - `(capture_session_id, track_id)` and managed-path uniqueness.
 - M4 migration upgrade and downgrade.
 
-The tracker stores only aggregate fields for each active track. Retired
-provenance entries, duplicate-close keys, recent closed events, and live
-metadata have explicit limits. It stores no observation history.
+The tracker stores only aggregate fields for each active track. Duplicate-close
+keys, recent closed events, and live metadata have explicit limits. It stores
+no observation history or retired-provenance list.
