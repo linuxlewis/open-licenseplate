@@ -22,6 +22,7 @@ from .cameras.service import CameraConfigurationError, prepare_camera_config
 from .capture import CameraRuntime, PyAVRTSPSource, SourceFactory
 from .config import AppSettings, UISettings, load_settings
 from .database import Database, database_status
+from .events import ManagedArtifactService
 from .inference import CoreMLBackend, DetectorRegistry, InferenceBackend
 from .live import LivePipelineCoordinator
 from .live.api import router as live_api_router
@@ -105,20 +106,32 @@ def create_app(
     """Create the application without starting a server."""
     effective_settings = settings or load_settings()
     paths = ManagedPaths.from_settings(effective_settings)
+    artifact_service = ManagedArtifactService(paths, application_version=__version__)
     effective_source_factory = source_factory or _default_source_factory
     camera_runtime = CameraRuntime(effective_source_factory)
     backend_factory = inference_backend_factory or CoreMLBackend
+
+    def effective_event_sink(event: Any) -> None:
+        if event_sink is not None:
+            try:
+                event_sink(event)
+            finally:
+                artifact_service.commit_closed_event(event)
+        else:
+            artifact_service.commit_closed_event(event)
+
     live_pipeline = LivePipelineCoordinator(
         camera_runtime,
         backend_factory,
         tracker_factory=tracker_factory,
         tracking_config=tracking_config or TrackingConfig(),
-        event_sink=event_sink,
+        event_sink=effective_event_sink,
     )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         paths.ensure_directories()
+        await asyncio.to_thread(artifact_service.reconcile)
         configure_logging(level=effective_settings.log_level, log_file=paths.app_log)
         application.state.startup_complete = True
         logger.info(
@@ -149,6 +162,7 @@ def create_app(
     application.state.camera_source_factory = effective_source_factory
     application.state.inference_backend_factory = backend_factory
     application.state.live_pipeline = live_pipeline
+    application.state.artifact_service = artifact_service
     application.state.detector_registry = DetectorRegistry(backend_factory)
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)

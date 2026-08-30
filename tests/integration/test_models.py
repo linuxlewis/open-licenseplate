@@ -47,7 +47,7 @@ def test_model_migration_has_expected_revision_and_columns(tmp_path: Path) -> No
     finally:
         database.dispose()
 
-    assert revision == "0004_events_artifacts"
+    assert revision == "0005_m4b_artifact_metadata"
     assert {
         "id",
         "display_name",

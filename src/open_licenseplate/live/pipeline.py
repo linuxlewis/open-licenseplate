@@ -875,6 +875,8 @@ class LivePipelineCoordinator:
                 frame_width=frame.width,
                 frame_height=frame.height,
                 detections=detections.detections,
+                source_pixels=frame.data,
+                pixel_format=frame.pixel_format,
             )
         )
         self._completed_at.append(completed_monotonic)
@@ -1073,15 +1075,19 @@ class LivePipelineCoordinator:
         )
 
     def _record_closed_event(self, event: ClosedTrackEvent) -> None:
-        """Keep a bounded recent view and isolate optional consumers."""
+        """Commit or forward one event, then release all retained crop pixels."""
+        public_event = event.without_crop_candidates()
         with self._condition:
-            self._recent_closed_events.append(event)
-        if self.event_sink is not None:
-            try:
+            self._recent_closed_events.append(public_event)
+        try:
+            if self.event_sink is not None:
                 self.event_sink(event)
-            except Exception:
-                # Event persistence is deliberately outside this milestone.
-                return
+        except Exception:
+            # Event persistence must not interrupt live tracking.
+            return
+        finally:
+            for candidate in event.crop_candidates:
+                candidate.release()
 
     def _is_current_locked(self, generation: _PipelineGeneration) -> bool:
         return self._generation is generation and generation.number == self._generation_number

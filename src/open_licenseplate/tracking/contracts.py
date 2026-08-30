@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from ..inference.contract import Detection
+from .crops import CropCandidate
 
 TrackLifecycleState = Literal["candidate", "confirmed", "active", "closed"]
 
@@ -64,6 +65,8 @@ class LiveDetectionFrame:
     detections: tuple[Detection, ...] = ()
     frame_width: int = 8192
     frame_height: int = 8192
+    source_pixels: Any | None = None
+    pixel_format: str = "bgr24"
 
     def __post_init__(self) -> None:
         if type(self.frame_sequence) is not int or self.frame_sequence < 0:
@@ -74,6 +77,8 @@ class LiveDetectionFrame:
             raise ValueError("frame_height must be a positive integer")
         if self.captured_at.tzinfo is None or self.captured_at.utcoffset() is None:
             raise ValueError("captured_at must be timezone-aware")
+        if not isinstance(self.pixel_format, str) or not self.pixel_format.strip():
+            raise ValueError("pixel_format is required")
         captured_at = self.captured_at.astimezone(UTC)
         object.__setattr__(self, "captured_at", captured_at)
         for detection in self.detections:
@@ -189,6 +194,7 @@ class ClosedTrackEvent:
     observation_count: int
     maximum_confidence: float
     event_state: Literal["closed"] = "closed"
+    crop_candidates: tuple[CropCandidate, ...] = ()
 
     @property
     def camera_id(self) -> str:
@@ -243,6 +249,8 @@ class ClosedTrackEvent:
         if type(self.observation_count) is not int or self.observation_count < 3:
             raise ValueError("closed events require at least three observations")
         _validate_confidence(self.maximum_confidence)
+        if len(self.crop_candidates) > 3:
+            raise ValueError("closed events may retain at most three crop candidates")
 
     @classmethod
     def create(
@@ -254,6 +262,7 @@ class ClosedTrackEvent:
         last_seen_at: datetime,
         observation_count: int,
         maximum_confidence: float,
+        crop_candidates: Sequence[CropCandidate] = (),
     ) -> ClosedTrackEvent:
         """Create one immutable event aggregate with a fresh local ID."""
         first_seen = first_seen_at.astimezone(UTC)
@@ -268,6 +277,7 @@ class ClosedTrackEvent:
             duration_seconds=duration_seconds,
             observation_count=observation_count,
             maximum_confidence=maximum_confidence,
+            crop_candidates=tuple(crop_candidates),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -283,6 +293,20 @@ class ClosedTrackEvent:
             "maximum_confidence": self.maximum_confidence,
             "event_state": self.event_state,
         }
+
+    def without_crop_candidates(self) -> ClosedTrackEvent:
+        """Return the bounded public event view without retained crop pixels."""
+        return ClosedTrackEvent(
+            event_id=self.event_id,
+            provenance=self.provenance,
+            track_id=self.track_id,
+            first_seen_at=self.first_seen_at,
+            last_seen_at=self.last_seen_at,
+            duration_seconds=self.duration_seconds,
+            observation_count=self.observation_count,
+            maximum_confidence=self.maximum_confidence,
+            event_state=self.event_state,
+        )
 
 
 @dataclass(frozen=True, slots=True)

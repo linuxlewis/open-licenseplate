@@ -33,7 +33,7 @@ def test_db_upgrade_command_runs_first_migration(
     )
 
     assert result == 0
-    assert "0004_events_artifacts" in capsys.readouterr().out
+    assert "0005_m4b_artifact_metadata" in capsys.readouterr().out
     assert (tmp_path / "data" / "open-licenseplate.sqlite3").is_file()
 
 

@@ -154,15 +154,22 @@ The capture package provides the M1 runtime:
 The preview encoder creates bounded MJPEG output from the newest decoded frame.
 The snapshot endpoint returns the newest frame as one JPEG.
 
-### M4-A tracking and event state
+### M4 tracking and event state
 
 The live pipeline uses a narrow `supervision` ByteTrack adapter behind an
 internal contract. Each validated detection carries camera, capture-session,
 generation, stream-epoch, frame, timestamp, model, and checksum provenance.
 The state machine confirms three matches in a short configurable window,
 expires short candidates, and closes confirmed tracks after one second without
-a match. A closed track emits one immutable in-memory aggregate. M4-A does
-not write the aggregate to SQLite; the later event transaction owns that work.
+a match. M4-B captures and ranks at most three source-pixel crops per active
+track. The `m4b-crop-score-v1` scorer records confidence, plate size, sharpness,
+exposure, contrast, clipping, and boundary-distance evidence.
+
+At closure, the managed artifact service writes fixed JPEG crops through
+staging and atomic rename. One SQLite transaction creates capture-session
+provenance as needed, inserts the event and artifact rows, and sets the best
+artifact ID. Duplicate closure for the same capture session and track is
+idempotent. M4 does not create durable processing jobs or OCR results.
 
 The synchronized live display metadata includes bounded active-track records.
 It keeps the JSON header and JPEG pair unchanged and rejects stale or
