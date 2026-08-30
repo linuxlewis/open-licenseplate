@@ -1,18 +1,15 @@
-"""Minimal M4 event persistence models and repository seams.
-
-Live tracking does not write these rows yet. The durable closure transaction is
-owned by the next milestone.
-"""
+"""M4 event persistence models and the short event closure transaction."""
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Float, Integer, String, Text, select
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from ..database import Database
 from ..settings_store import UTCDateTime
@@ -85,13 +82,18 @@ class EventArtifact(EventBase):
     detection_confidence: Mapped[float] = mapped_column(Float, nullable=False)
     quality_score: Mapped[float] = mapped_column(Float, nullable=False)
     quality_scoring_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    quality_evidence_json: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default="{}",
+    )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
 
 @dataclass(frozen=True, slots=True)
 class CaptureSessionCreate:
-    """Values needed for a future capture-session row."""
+    """Values needed for a capture-session provenance row."""
 
     id: str
     camera_id: str
@@ -100,10 +102,37 @@ class CaptureSessionCreate:
     started_at: datetime
     compute_configuration: dict[str, Any]
     application_version: str
+    ended_at: datetime | None = None
+    end_reason: str | None = None
+    negotiated_codec: str | None = None
+    negotiated_width: int | None = None
+    negotiated_height: int | None = None
+    negotiated_fps: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommittedArtifact:
+    """Immutable artifact values inserted with one event transaction."""
+
+    id: str
+    event_id: str
+    artifact_kind: str
+    managed_relative_path: str
+    sha256: str
+    mime_type: str
+    byte_size: int
+    width: int
+    height: int
+    source_frame_sequence: int
+    source_timestamp: datetime
+    detection_confidence: float
+    quality_score: float
+    quality_scoring_version: str
+    quality_evidence: dict[str, Any]
 
 
 class EventRepository:
-    """Provide only the small persistence seams required by M4-A tests."""
+    """Provide bounded event reads and the M4-B closure transaction."""
 
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -117,6 +146,12 @@ class EventRepository:
             model_checksum=values.model_checksum,
             compute_configuration_json=_dump_json(values.compute_configuration),
             started_at=_aware_utc(values.started_at),
+            ended_at=None if values.ended_at is None else _aware_utc(values.ended_at),
+            end_reason=values.end_reason,
+            negotiated_codec=values.negotiated_codec,
+            negotiated_width=values.negotiated_width,
+            negotiated_height=values.negotiated_height,
+            negotiated_fps=values.negotiated_fps,
             application_version=values.application_version,
         )
         with self.database.session() as session:
@@ -124,6 +159,132 @@ class EventRepository:
             session.flush()
             session.expunge(row)
         return row
+
+    def commit_closed_event(
+        self,
+        event: ClosedTrackEvent,
+        *,
+        artifacts: Sequence[CommittedArtifact],
+        crop_ranking_version: str,
+        capture_session: CaptureSessionCreate | None = None,
+    ) -> DetectionEvent:
+        """Commit provenance, one event, and all selected artifacts together."""
+        if not crop_ranking_version.strip():
+            raise ValueError("crop_ranking_version is required")
+        if len(artifacts) > 3:
+            raise ValueError("an event may commit at most three artifacts")
+        if any(artifact.event_id != event.event_id for artifact in artifacts):
+            raise ValueError("artifact event IDs must match the closed event")
+
+        session_values = capture_session or CaptureSessionCreate(
+            id=event.capture_session_id,
+            camera_id=event.camera_id,
+            model_id=event.model_id,
+            model_checksum=event.model_checksum,
+            started_at=event.first_seen_at,
+            compute_configuration={"capture": "live"},
+            application_version="unknown",
+        )
+        now = datetime.now(UTC)
+        with (
+            self.database.engine.begin() as connection,
+            Session(
+                bind=connection,
+                autoflush=False,
+                expire_on_commit=False,
+            ) as session,
+        ):
+            existing = session.scalar(
+                select(DetectionEvent).where(
+                    DetectionEvent.capture_session_id == event.capture_session_id,
+                    DetectionEvent.track_id == event.track_id,
+                )
+            )
+            if existing is not None:
+                session.expunge(existing)
+                return existing
+
+            session_row = session.get(CaptureSession, session_values.id)
+            if session_row is None:
+                session_row = CaptureSession(
+                    id=session_values.id,
+                    camera_id=session_values.camera_id,
+                    model_id=session_values.model_id,
+                    model_checksum=session_values.model_checksum,
+                    compute_configuration_json=_dump_json(session_values.compute_configuration),
+                    started_at=_aware_utc(session_values.started_at),
+                    ended_at=(
+                        None
+                        if session_values.ended_at is None
+                        else _aware_utc(session_values.ended_at)
+                    ),
+                    end_reason=session_values.end_reason,
+                    negotiated_codec=session_values.negotiated_codec,
+                    negotiated_width=session_values.negotiated_width,
+                    negotiated_height=session_values.negotiated_height,
+                    negotiated_fps=session_values.negotiated_fps,
+                    application_version=session_values.application_version,
+                )
+                session.add(session_row)
+                session.flush()
+            elif (
+                session_row.camera_id != event.camera_id
+                or session_row.model_id != event.model_id
+                or session_row.model_checksum != event.model_checksum
+            ):
+                raise ValueError("capture-session provenance does not match the event")
+
+            event_row = DetectionEvent(
+                id=event.event_id,
+                camera_id=event.camera_id,
+                capture_session_id=event.capture_session_id,
+                track_id=event.track_id,
+                model_id=event.model_id,
+                model_checksum=event.model_checksum,
+                first_seen_at=_aware_utc(event.first_seen_at),
+                last_seen_at=_aware_utc(event.last_seen_at),
+                duration_seconds=event.duration_seconds,
+                observation_count=event.observation_count,
+                maximum_confidence=event.maximum_confidence,
+                event_state=event.event_state,
+                best_artifact_id=None,
+                crop_ranking_version=crop_ranking_version,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(event_row)
+            session.flush()
+
+            artifact_rows = [
+                EventArtifact(
+                    id=artifact.id,
+                    event_id=artifact.event_id,
+                    artifact_kind=artifact.artifact_kind,
+                    managed_relative_path=artifact.managed_relative_path,
+                    sha256=artifact.sha256,
+                    mime_type=artifact.mime_type,
+                    byte_size=artifact.byte_size,
+                    width=artifact.width,
+                    height=artifact.height,
+                    source_frame_sequence=artifact.source_frame_sequence,
+                    source_timestamp=_aware_utc(artifact.source_timestamp),
+                    detection_confidence=artifact.detection_confidence,
+                    quality_score=artifact.quality_score,
+                    quality_scoring_version=artifact.quality_scoring_version,
+                    quality_evidence_json=_dump_json(artifact.quality_evidence),
+                    created_at=now,
+                )
+                for artifact in artifacts
+            ]
+            session.add_all(artifact_rows)
+            session.flush()
+            if artifact_rows:
+                event_row.best_artifact_id = artifact_rows[0].id
+                event_row.updated_at = now
+                session.flush()
+
+            session.expunge(event_row)
+            return event_row
 
     def create_closed_event(
         self,
@@ -163,6 +324,37 @@ class EventRepository:
         with self.database.session() as session:
             return session.get(DetectionEvent, event_id)
 
+    def get_by_durable_key(self, capture_session_id: str, track_id: int) -> DetectionEvent | None:
+        """Read one event by the durable capture-session and track key."""
+        with self.database.session() as session:
+            return session.scalar(
+                select(DetectionEvent).where(
+                    DetectionEvent.capture_session_id == capture_session_id,
+                    DetectionEvent.track_id == track_id,
+                )
+            )
+
+    def artifacts_for_event(self, event_id: str) -> list[EventArtifact]:
+        """Read committed artifacts in deterministic best-first order."""
+        with self.database.session() as session:
+            return list(
+                session.scalars(
+                    select(EventArtifact)
+                    .where(EventArtifact.event_id == event_id)
+                    .order_by(
+                        EventArtifact.quality_score.desc(),
+                        EventArtifact.detection_confidence.desc(),
+                        EventArtifact.source_frame_sequence.asc(),
+                        EventArtifact.id.asc(),
+                    )
+                )
+            )
+
+    def managed_relative_paths(self) -> set[str]:
+        """Return all stored paths for startup reconciliation."""
+        with self.database.session() as session:
+            return set(session.scalars(select(EventArtifact.managed_relative_path)))
+
     def list(self, *, limit: int = 100) -> list[DetectionEvent]:
         """Read a bounded newest-first event slice."""
         if type(limit) is not int or not 1 <= limit <= 1000:
@@ -190,6 +382,7 @@ def _dump_json(value: Any) -> str:
 __all__ = [
     "CaptureSession",
     "CaptureSessionCreate",
+    "CommittedArtifact",
     "DetectionEvent",
     "EventArtifact",
     "EventRepository",

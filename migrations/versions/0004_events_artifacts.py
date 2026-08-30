@@ -106,6 +106,12 @@ def upgrade() -> None:
         sa.Column("detection_confidence", sa.Float(), nullable=False),
         sa.Column("quality_score", sa.Float(), nullable=False),
         sa.Column("quality_scoring_version", sa.String(length=64), nullable=False),
+        sa.Column(
+            "quality_evidence_json",
+            sa.Text(),
+            nullable=False,
+            server_default=sa.text("'{}'"),
+        ),
         sa.Column("created_at", sa.Text(), nullable=False),
         sa.Column("deleted_at", sa.Text(), nullable=True),
         sa.ForeignKeyConstraint(

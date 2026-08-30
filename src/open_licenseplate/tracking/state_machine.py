@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ..capture.contracts import Clock, SystemClock
+from ..inference.contract import Detection
 from .contracts import (
     ActiveTrack,
     ClosedTrackEvent,
@@ -18,6 +19,7 @@ from .contracts import (
     TrackingProvenance,
     TrackingUpdate,
 )
+from .crops import CropCandidate, capture_crop_candidate
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +31,7 @@ class TrackingConfig:
     close_timeout_seconds: float = 1.0
     max_active_tracks: int = 64
     max_closed_track_keys: int = 128
+    max_crop_candidates_per_track: int = 3
 
     def __post_init__(self) -> None:
         if type(self.confirmation_observations) is not int or self.confirmation_observations < 3:
@@ -42,9 +45,12 @@ class TrackingConfig:
         for value, field_name in (
             (self.max_active_tracks, "max_active_tracks"),
             (self.max_closed_track_keys, "max_closed_track_keys"),
+            (self.max_crop_candidates_per_track, "max_crop_candidates_per_track"),
         ):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{field_name} must be positive")
+        if self.max_crop_candidates_per_track > 3:
+            raise ValueError("max_crop_candidates_per_track must not exceed three")
 
 
 @dataclass
@@ -63,6 +69,7 @@ class _TrackState:
     observation_count: int = 1
     maximum_confidence: float = 0.0
     state: str = "candidate"
+    crop_candidates: list[CropCandidate] = field(default_factory=list)
 
 
 TrackerFactory = Callable[[], TrackerAdapter]
@@ -92,6 +99,7 @@ class TrackingEventAggregator:
             maxlen=self.config.max_closed_track_keys
         )
         self._closed_track_key_set: set[tuple[str, int]] = set()
+        self._released_crop_candidate_count = 0
 
     @property
     def active_tracks(self) -> tuple[ActiveTrack, ...]:
@@ -102,6 +110,21 @@ class TrackingEventAggregator:
     def active_track_count(self) -> int:
         """Return the bounded count of confirmed live tracks."""
         return len(self._active_track_payloads())
+
+    @property
+    def active_crop_candidate_count(self) -> int:
+        """Return the bounded count of retained candidates across active tracks."""
+        return sum(len(track.crop_candidates) for track in self._tracks.values())
+
+    @property
+    def crop_candidate_limit(self) -> int:
+        """Return the explicit per-track candidate limit."""
+        return self.config.max_crop_candidates_per_track
+
+    @property
+    def released_crop_candidate_count(self) -> int:
+        """Return the number of evicted or discarded candidates released."""
+        return self._released_crop_candidate_count
 
     @property
     def tracker(self) -> TrackerAdapter:
@@ -158,6 +181,7 @@ class TrackingEventAggregator:
     def reset(self) -> TrackingUpdate:
         """Close confirmed tracks once and clear all tracker state."""
         closed_events = self._close_confirmed_tracks()
+        self._release_unconfirmed_tracks()
         self._tracks.clear()
         self._last_frame_sequence = None
         self._provenance = None
@@ -174,6 +198,7 @@ class TrackingEventAggregator:
         if not self._requires_activation and provenance == self._provenance:
             return self._update(())
         closed_events = self._close_confirmed_tracks()
+        self._release_unconfirmed_tracks()
         self._tracks.clear()
         self._last_frame_sequence = None
         self._provenance = provenance
@@ -200,6 +225,11 @@ class TrackingEventAggregator:
         detection = match.detection
         current_monotonic = self._clock.monotonic()
         track = self._tracks.get(key)
+        if track is not None and (
+            current_monotonic < track.last_seen_monotonic or frame.captured_at < track.last_seen_at
+        ):
+            return
+        candidate = self._capture_candidate(frame, detection)
         if track is None:
             track = _TrackState(
                 provenance=frame.provenance,
@@ -214,12 +244,10 @@ class TrackingEventAggregator:
                 maximum_confidence=detection.confidence,
             )
             self._tracks[key] = track
+            if candidate is not None:
+                self._retain_candidate(track, candidate)
             return
 
-        if current_monotonic < track.last_seen_monotonic:
-            return
-        if frame.captured_at < track.last_seen_at:
-            return
         track.last_seen_at = frame.captured_at
         track.last_seen_monotonic = current_monotonic
         track.last_frame_sequence = frame.frame_sequence
@@ -227,6 +255,8 @@ class TrackingEventAggregator:
         track.last_confidence = detection.confidence
         track.maximum_confidence = max(track.maximum_confidence, detection.confidence)
         track.observation_count += 1
+        if candidate is not None:
+            self._retain_candidate(track, candidate)
         if (
             track.state == "candidate"
             and track.observation_count >= self.config.confirmation_observations
@@ -238,6 +268,7 @@ class TrackingEventAggregator:
                 track.state = "confirmed"
                 track.state = "active"
             else:
+                self._release_candidates(track)
                 self._tracks.pop(key, None)
 
     def _expire(self, now_monotonic: float) -> tuple[ClosedTrackEvent, ...]:
@@ -248,6 +279,7 @@ class TrackingEventAggregator:
                     now_monotonic - track.first_seen_monotonic
                     >= self.config.confirmation_window_seconds
                 ):
+                    self._release_candidates(track)
                     self._tracks.pop(key, None)
                 continue
             if now_monotonic - track.last_seen_monotonic >= self.config.close_timeout_seconds:
@@ -273,10 +305,50 @@ class TrackingEventAggregator:
             last_seen_at=track.last_seen_at,
             observation_count=track.observation_count,
             maximum_confidence=track.maximum_confidence,
+            crop_candidates=tuple(sorted(track.crop_candidates, key=CropCandidate.rank_key)),
         )
         if self._on_closed_event is not None:
             self._on_closed_event(event)
         return event
+
+    def _capture_candidate(
+        self,
+        frame: LiveDetectionFrame,
+        detection: Detection,
+    ) -> CropCandidate | None:
+        if frame.source_pixels is None:
+            return None
+        try:
+            return capture_crop_candidate(
+                source_pixels=frame.source_pixels,
+                pixel_format=frame.pixel_format,
+                frame_width=frame.frame_width,
+                frame_height=frame.frame_height,
+                frame_sequence=frame.frame_sequence,
+                source_timestamp=frame.captured_at,
+                detection=detection,
+            )
+        except (TypeError, ValueError):
+            return None
+
+    def _retain_candidate(self, track: _TrackState, candidate: CropCandidate) -> None:
+        track.crop_candidates.append(candidate)
+        track.crop_candidates.sort(key=CropCandidate.rank_key)
+        while len(track.crop_candidates) > self.config.max_crop_candidates_per_track:
+            evicted = track.crop_candidates.pop()
+            evicted.release()
+            self._released_crop_candidate_count += 1
+
+    def _release_unconfirmed_tracks(self) -> None:
+        for track in self._tracks.values():
+            if track.state == "candidate":
+                self._release_candidates(track)
+
+    def _release_candidates(self, track: _TrackState) -> None:
+        for candidate in track.crop_candidates:
+            candidate.release()
+            self._released_crop_candidate_count += 1
+        track.crop_candidates.clear()
 
     def _update(self, closed_events: tuple[ClosedTrackEvent, ...]) -> TrackingUpdate:
         return TrackingUpdate(
