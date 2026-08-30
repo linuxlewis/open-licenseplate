@@ -129,7 +129,7 @@ class EventRepository:
         self,
         event: ClosedTrackEvent,
         *,
-        crop_ranking_version: str = "m4-a-none",
+        crop_ranking_version: str,
     ) -> DetectionEvent:
         """Insert one aggregate and leave uniqueness to SQLite."""
         if not crop_ranking_version.strip():
