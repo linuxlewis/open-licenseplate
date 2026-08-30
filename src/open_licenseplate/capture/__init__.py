@@ -1,6 +1,11 @@
 """Frame-source contracts, implementations, and latest-frame delivery."""
 
-from .broker import BrokerMetrics, LatestFrameBroker, LatestFrameSubscription
+from .broker import (
+    LATEST_FRAME_CAPACITY,
+    BrokerMetrics,
+    LatestFrameBroker,
+    LatestFrameSubscription,
+)
 from .contracts import (
     CaptureSession,
     CaptureShutdownError,
@@ -65,6 +70,7 @@ __all__ = [
     "LifecycleState",
     "LatestFrameBroker",
     "LatestFrameSubscription",
+    "LATEST_FRAME_CAPACITY",
     "ReconnectBackoff",
     "ReconnectFixture",
     "ReconnectStateMachine",

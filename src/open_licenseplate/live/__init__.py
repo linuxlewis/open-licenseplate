@@ -1,6 +1,7 @@
 """Live capture and inference coordination contracts."""
 
 from .display import (
+    DISPLAY_BUFFER_CAPACITY,
     LIVE_PROTOCOL_VERSION,
     MAX_RETIRED_PROVENANCES,
     DisplayBrokerMetrics,
@@ -36,6 +37,7 @@ from .pipeline import (
 __all__ = [
     "BackendFactory",
     "DisplayBrokerMetrics",
+    "DISPLAY_BUFFER_CAPACITY",
     "DisplayMessageTooLarge",
     "DisplayProtocolError",
     "DisplayShutdownError",
