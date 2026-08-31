@@ -1,0 +1,1149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Local-first license plate detection">
+    <title>{{ page.title }} - {{ app_name }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
+    <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
+    {% if page.key == "live" %}
+      <script src="{{ request.url_for('static', path='live.js') }}" defer></script>
+    {% elif page.key == "models" %}
+      <script type="module" src="{{ request.url_for('static', path='model-detection.js') }}" defer></script>
+    {% endif %}
+  </head>
+  <body class="density-{{ ui_density }}">
+    <div class="app-background" aria-hidden="true"></div>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/live" aria-label="{{ app_name }} home">
+          <span class="brand-mark">OL</span>
+          <span class="brand-copy">
+            <strong>{{ app_name }}</strong>
+            <small>local detection workspace</small>
+          </span>
+        </a>
+        <div class="topbar-meta">
+          <span class="version-chip">v{{ app_version }}</span>
+          <span class="status-chip status-chip-{{ global_status.tone }}">
+            <span class="status-dot" aria-hidden="true"></span>
+            {{ global_status.label }}
+          </span>
+        </div>
+      </header>
+
+      <div class="shell-body">
+        <aside class="sidebar" aria-label="Primary navigation">
+          <div class="sidebar-intro">
+            <span class="eyebrow">Operator console</span>
+            <p>Keep local state visible. Add runtime capability only when it is ready.</p>
+          </div>
+          <nav class="primary-nav" hx-boost="true">
+            {% for item in nav_items %}
+              <a
+                class="nav-link{% if item.active %} nav-link-active{% endif %}"
+                href="{{ item.path }}"
+                {% if item.active %}aria-current="page"{% endif %}
+              >
+                <span>{{ item.label }}</span>
+                {% if item.active %}<span class="nav-arrow" aria-hidden="true">-&gt;</span>{% endif %}
+              </a>
+            {% endfor %}
+          </nav>
+          <div class="sidebar-foot">
+            <span class="eyebrow">Local only</span>
+            <p>Loopback by default. Secrets stay outside the shell.</p>
+          </div>
+        </aside>
+
+        <main id="page-content" class="content">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">{{ page.eyebrow }}</span>
+              <h1>{{ page.title }}</h1>
+              <p class="lede">{{ page.description }}</p>
+            </div>
+            <span class="page-index" aria-hidden="true">{{ page_index }}</span>
+          </div>
+
+          {% if page.key == "live" %}
+            <div
+              class="live-layout"
+              data-live-runtime
+              data-selected-camera="{{ selected_camera_id or '' }}"
+              data-selected-model="{{ selected_model_id or '' }}"
+              data-state="{{ live_status.state }}"
+            >
+              <section class="card live-control-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Detection lifecycle</span>
+                    <h2>One active pipeline</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">LIVE</span>
+                </div>
+                <p class="form-note">
+                  Detection uses a bounded processed-frame stream. The raw MJPEG preview below is
+                  separate and never supplies detection overlays.
+                </p>
+                <label class="field-label" for="live-camera">Selected camera</label>
+                <select id="live-camera" name="camera_id" {% if not cameras %}disabled{% endif %}>
+                  {% if cameras %}
+                    {% for camera in cameras %}
+                      <option value="{{ camera.id }}" {% if camera.id == selected_camera_id %}selected{% endif %}>
+                        {{ camera.name }}
+                      </option>
+                    {% endfor %}
+                  {% else %}
+                    <option>No camera profiles</option>
+                  {% endif %}
+                </select>
+                <label class="field-label" for="live-model">Selected model</label>
+                <select id="live-model" name="model_id" {% if not models %}disabled{% endif %}>
+                  {% set runtime_models = models|selectattr("runtime_valid")|list %}
+                  {% if runtime_models %}
+                    {% for model in runtime_models %}
+                      <option
+                        value="{{ model.id }}"
+                        {% if model.id == selected_model_id or (not selected_model_id and model.active) %}selected{% endif %}
+                      >
+                        {{ model.display_name }}
+                      </option>
+                    {% endfor %}
+                  {% else %}
+                    <option value="">No runtime-valid models</option>
+                  {% endif %}
+                </select>
+                <div class="form-row">
+                  <div>
+                    <label class="field-label" for="live-threshold">Confidence threshold</label>
+                    <input
+                      id="live-threshold"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value="{{ live_status.confidence_threshold or 0.35 }}"
+                      {% if not runtime_models %}disabled{% endif %}
+                    >
+                  </div>
+                  <output class="live-threshold-value" id="live-threshold-value" for="live-threshold">
+                    {{ "%.2f"|format(live_status.confidence_threshold or 0.35) }}
+                  </output>
+                </div>
+                <label class="field-label" for="live-compute">Compute configuration</label>
+                <select id="live-compute" {% if not runtime_models %}disabled{% endif %}>
+                  <option value="all">All</option>
+                  <option value="cpu_only">CPU only</option>
+                  <option value="cpu_and_gpu">CPU and GPU</option>
+                  <option value="cpu_and_ne">CPU and Neural Engine</option>
+                </select>
+                <div class="live-actions">
+                  <button
+                    class="save-button"
+                    id="live-start-detection"
+                    type="button"
+                    {% if not cameras or not runtime_models %}disabled{% endif %}
+                  >
+                    Start detection
+                  </button>
+                  <button class="quiet-button" id="live-stop-detection" type="button">
+                    Stop detection
+                  </button>
+                </div>
+                <div class="live-actions live-actions-secondary">
+                  <button class="quiet-button" id="live-start" type="button" {% if not cameras %}disabled{% endif %}>
+                    Start preview
+                  </button>
+                  <button class="quiet-button" id="live-stop" type="button" {% if not cameras %}disabled{% endif %}>
+                    Stop
+                  </button>
+                </div>
+                <p class="live-message" id="live-message" role="status">
+                  {% if runtime_status.state == "failed" %}
+                    The source failed to open{% if runtime_status.last_error %}: {{ runtime_status.last_error }}{% endif %}.
+                    Fix the source settings, then press Start preview.
+                  {% elif live_status.state == "failed" %}
+                    Detection failed{% if live_status.failure %}: {{ live_status.failure.message }}{% endif %}.
+                    Fix the source or model, then press Start detection.
+                  {% elif runtime_status.state == "stopping" or live_status.state == "stopping" %}
+                    Stopping the camera and releasing source resources.
+                  {% elif cameras and runtime_models %}
+                    Select a camera and model, then start detection. You can also start the raw preview.
+                  {% elif not cameras %}
+                    Add a camera profile before starting detection.
+                  {% else %}
+                    Import and validate a model before starting detection.
+                  {% endif %}
+                </p>
+                <a class="text-link" id="live-snapshot" href="#" hidden>Open raw JPEG snapshot</a>
+              </section>
+
+              <section class="card live-preview-card live-raw-preview-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Raw camera path</span>
+                    <h2 id="live-preview-title">Preview is stopped</h2>
+                  </div>
+                  <span class="camera-state" id="live-state">{{ runtime_status.state|title }}</span>
+                </div>
+                <div class="preview-stage">
+                  <div class="preview-empty" id="live-preview-empty">
+                    <span class="empty-orbit small" aria-hidden="true"><span></span><span></span><span></span></span>
+                    <strong>Waiting for a decoded frame</strong>
+                    <span>The latest frame appears here when the source is streaming.</span>
+                  </div>
+                  <img id="live-preview" alt="Current camera preview" hidden>
+                </div>
+                <dl class="live-metadata">
+                  <div><dt>Codec</dt><dd id="live-codec">Unavailable</dd></div>
+                  <div><dt>Resolution</dt><dd id="live-resolution">Unavailable</dd></div>
+                  <div><dt>Nominal FPS</dt><dd id="live-fps">Unavailable</dd></div>
+                  <div><dt>Transport</dt><dd id="live-transport">Unavailable</dd></div>
+                  <div><dt>Camera PTS</dt><dd id="live-pts">Unavailable</dd></div>
+                  <div><dt>Reconnect attempt</dt><dd id="live-reconnect">0</dd></div>
+                  <div><dt>Frame age</dt><dd id="live-age">Unavailable</dd></div>
+                  <div><dt>Replaced frames</dt><dd id="live-replaced">0</dd></div>
+                </dl>
+              </section>
+
+              <section class="card live-preview-card live-processed-preview-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Processed display unit</span>
+                    <h2 id="live-processed-title">Detection is stopped</h2>
+                  </div>
+                  <span class="camera-state" id="live-processed-state">Idle</span>
+                </div>
+                <p class="form-note">
+                  Every visible box uses the JSON header and JPEG bytes from the same processed frame.
+                </p>
+                <div class="processed-stage" id="live-processed-stage">
+                  <div class="preview-empty" id="live-processed-empty">
+                    <span class="empty-orbit small" aria-hidden="true"><span></span><span></span><span></span></span>
+                    <strong>Waiting for a processed frame</strong>
+                    <span>Start detection to receive synchronized JPEG display units.</span>
+                  </div>
+                  <div class="processed-frame" id="live-processed-frame" hidden>
+                    <img id="live-processed-preview" alt="Current processed camera frame">
+                  </div>
+                </div>
+                <label class="check-field live-overlay-toggle">
+                  <input id="live-overlay-enabled" type="checkbox" checked>
+                  Show detection overlay
+                </label>
+                <dl class="live-metrics live-processed-metrics">
+                  <div><dt>Processed FPS</dt><dd id="live-processed-fps">Unavailable</dd></div>
+                  <div><dt>Capture age</dt><dd id="live-processed-age">Unavailable</dd></div>
+                  <div><dt>Preprocessing</dt><dd id="live-processed-preprocessing">Unavailable</dd></div>
+                  <div><dt>Prediction current</dt><dd id="live-processed-prediction">Unavailable</dd></div>
+                  <div><dt>Prediction P50</dt><dd id="live-processed-p50">Unavailable</dd></div>
+                  <div><dt>Prediction P95</dt><dd id="live-processed-p95">Unavailable</dd></div>
+                  <div><dt>Postprocessing</dt><dd id="live-processed-postprocessing">Unavailable</dd></div>
+                  <div><dt>End-to-end latency</dt><dd id="live-processed-e2e">Unavailable</dd></div>
+                  <div><dt>Source replaced</dt><dd id="live-processed-source-replaced">0</dd></div>
+                  <div><dt>Inference replaced</dt><dd id="live-processed-inference-replaced">0</dd></div>
+                  <div><dt>Display replaced</dt><dd id="live-processed-display-replaced">0</dd></div>
+                  <div><dt>Frame sequence</dt><dd id="live-processed-sequence">Unavailable</dd></div>
+                  <div><dt>Stream epoch</dt><dd id="live-processed-epoch">Unavailable</dd></div>
+                  <div><dt>Capture session</dt><dd id="live-processed-session">Unavailable</dd></div>
+                  <div><dt>Active tracks</dt><dd id="live-processed-active-tracks">0</dd></div>
+                </dl>
+              </section>
+            </div>
+          {% elif page.key == "events" or page.key == "event_detail" %}
+            {% if page.key == "events" %}
+              {% if events %}
+                <section class="card card-wide event-list-card" data-event-list>
+                  <div class="card-heading">
+                    <div>
+                      <span class="eyebrow">Newest first</span>
+                      <h2>{{ events|length }} event{% if events|length != 1 %}s{% endif %}</h2>
+                    </div>
+                    <span class="card-icon" aria-hidden="true">REVIEW</span>
+                  </div>
+                  <div class="event-list">
+                    {% for event in events %}
+                      <article class="event-row">
+                        <div class="event-thumbnail">
+                          {% if event.best_crop and event.best_crop.availability == "available" %}
+                            <img
+                              src="{{ event.best_crop.url }}"
+                              alt="Best crop for event {{ event.event_id }}"
+                              loading="lazy"
+                            >
+                          {% else %}
+                            <span class="artifact-unavailable">Crop unavailable</span>
+                          {% endif %}
+                        </div>
+                        <div class="event-row-main">
+                          <div class="event-row-heading">
+                            <div>
+                              <span class="eyebrow">{{ event.event_state|title }}</span>
+                              <h3>
+                                <a href="/events/{{ event.event_id }}">{{ event.camera_display_name }}</a>
+                              </h3>
+                            </div>
+                            <span class="event-confidence">{{ "%.1f"|format(event.maximum_confidence * 100) }}%</span>
+                          </div>
+                          <p class="event-time">
+                            {{ event.first_seen_utc }} - {{ event.last_seen_utc }}
+                            <span aria-hidden="true">/</span>
+                            {{ "%.3f"|format(event.duration_seconds) }} s
+                          </p>
+                          <div class="event-facts">
+                            <span>{{ event.observation_count }} observations</span>
+                            <span>Track {{ event.track_id }}</span>
+                            <span>Model {{ event.model_provenance.display_name }}</span>
+                            <span>{{ event.model_provenance.model_id }}</span>
+                            <span class="break-code">{{ event.model_provenance.model_checksum }}</span>
+                            <span>{{ event.crop_ranking_version }}</span>
+                          </div>
+                        </div>
+                      </article>
+                    {% endfor %}
+                  </div>
+                </section>
+              {% else %}
+                <section class="empty-card" data-event-empty>
+                  <div class="empty-orbit" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </div>
+                  <div class="empty-copy">
+                    <span class="eyebrow">Awaiting review data</span>
+                    <h2>No plate events yet</h2>
+                    <p>
+                      Confirmed tracks will appear here with timestamps, camera provenance,
+                      confidence, and ranked crop evidence.
+                    </p>
+                    <span class="planned-label">M4-C review workflow</span>
+                  </div>
+                </section>
+              {% endif %}
+            {% elif event_detail %}
+              <div class="event-detail-actions">
+                <a class="text-link" href="/events">&lt;- Back to events</a>
+              </div>
+              <div class="event-detail-layout" data-event-detail>
+                <section class="card event-summary-card">
+                  <div class="card-heading">
+                    <div>
+                      <span class="eyebrow">Confirmed appearance</span>
+                      <h2>{{ event_detail.camera_display_name }}</h2>
+                    </div>
+                    <span class="camera-state">{{ event_detail.event_state|title }}</span>
+                  </div>
+                  <dl class="detail-list">
+                    <div class="detail-row">
+                      <dt>Camera</dt>
+                      <dd><strong>{{ event_detail.camera_display_name }}</strong><small>ID: {{ event_detail.camera_id }}</small></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>Track</dt>
+                      <dd><strong>{{ event_detail.track_id }}</strong><small>Capture session: {{ event_detail.capture_session_id }}</small></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>First seen</dt>
+                      <dd><strong>{{ event_detail.first_seen_utc }}</strong><small>Last seen: {{ event_detail.last_seen_utc }}</small></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>Duration</dt>
+                      <dd><strong>{{ "%.3f"|format(event_detail.duration_seconds) }} seconds</strong><small>{{ event_detail.observation_count }} observations</small></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>Maximum confidence</dt>
+                      <dd><strong>{{ "%.1f"|format(event_detail.maximum_confidence * 100) }}%</strong></dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section class="card event-provenance-card">
+                  <div class="card-heading">
+                    <div>
+                      <span class="eyebrow">Immutable provenance</span>
+                      <h2>Detection source</h2>
+                    </div>
+                    <span class="card-icon" aria-hidden="true">TRACE</span>
+                  </div>
+                  <dl class="detail-list">
+                    <div class="detail-row">
+                      <dt>Model</dt>
+                      <dd><strong>{{ event_detail.model.display_name }}</strong><small>ID: {{ event_detail.model.model_id }}</small></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>Model checksum</dt>
+                      <dd><code class="break-code">{{ event_detail.model.model_checksum }}</code></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>Capture session</dt>
+                      <dd><code class="break-code">{{ event_detail.capture_session_id }}</code></dd>
+                    </div>
+                    <div class="detail-row">
+                      <dt>Crop ranking</dt>
+                      <dd><strong>{{ event_detail.crop_ranking_version }}</strong><small>Ranks are explicit and stable.</small></dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section class="card card-wide event-ocr-card">
+                  <div class="card-heading">
+                    <div>
+                      <span class="eyebrow">Recognition</span>
+                      <h2>No OCR data</h2>
+                    </div>
+                    <span class="card-icon" aria-hidden="true">NONE</span>
+                  </div>
+                  <p class="no-ocr-state">
+                    OCR is not available in this M4-C workflow. No plate text was inferred or stored.
+                  </p>
+                </section>
+
+                <section class="card card-wide event-crops-card">
+                  <div class="card-heading">
+                    <div>
+                      <span class="eyebrow">Committed evidence</span>
+                      <h2>{{ event_detail.artifacts|length }} ranked crop{% if event_detail.artifacts|length != 1 %}s{% endif %}</h2>
+                    </div>
+                    <span class="card-icon" aria-hidden="true">CROPS</span>
+                  </div>
+                  {% if event_detail.artifacts %}
+                    <ol class="crop-grid">
+                      {% for crop in event_detail.artifacts %}
+                        <li class="crop-card" data-crop-rank="{{ crop.rank }}">
+                          <div class="crop-image">
+                            {% if crop.availability == "available" %}
+                              <img
+                                src="{{ crop.url }}"
+                                alt="Committed crop ranked {{ crop.rank + 1 }}"
+                              >
+                            {% else %}
+                              <span class="artifact-unavailable">Crop unavailable</span>
+                            {% endif %}
+                            <span class="crop-rank">Rank {{ crop.rank + 1 }}</span>
+                          </div>
+                          <dl class="detail-list">
+                            <div class="detail-row">
+                              <dt>Availability</dt>
+                              <dd><strong>{{ crop.availability|title }}</strong></dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Artifact</dt>
+                              <dd><strong>{{ crop.artifact_kind|title }}</strong><small>{{ crop.mime_type }}</small></dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Image</dt>
+                              <dd><strong>{{ crop.width }} x {{ crop.height }}</strong><small>{{ crop.byte_size }} bytes</small></dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Quality</dt>
+                              <dd><strong>{{ "%.6f"|format(crop.quality_score) }}</strong><small>{{ crop.quality_scoring_version }}</small></dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Source</dt>
+                              <dd><strong>Frame {{ crop.source_frame_sequence }}</strong><small>{{ crop.source_timestamp_utc }}</small></dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Checksum</dt>
+                              <dd><code class="break-code">{{ crop.sha256 }}</code></dd>
+                            </div>
+                          </dl>
+                        </li>
+                      {% endfor %}
+                    </ol>
+                  {% else %}
+                    <p class="form-note">This event has no committed crop artifacts.</p>
+                  {% endif %}
+                </section>
+              </div>
+            {% else %}
+              <section class="empty-card">
+                <div class="empty-orbit" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </div>
+                <div class="empty-copy">
+                  <span class="eyebrow">Review unavailable</span>
+                  <h2>Event not available</h2>
+                  <p>The event does not exist or the local review store is not ready.</p>
+                  <a class="text-link" href="/events">Return to events</a>
+                </div>
+              </section>
+            {% endif %}
+          {% elif page.key == "cameras" %}
+            {% if camera_feedback %}
+              <div class="notice notice-{{ camera_feedback.tone }}" role="status">
+                {{ camera_feedback.message }}
+              </div>
+            {% endif %}
+
+            <div class="camera-layout">
+              <section class="card camera-form-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Configuration</span>
+                    <h2>Add camera</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">ADD</span>
+                </div>
+                <p class="form-note">
+                  Store a safe endpoint description and a reference such as
+                  <code>env:CAMERA_RTSP_URL</code>. The referenced value stays outside SQLite.
+                </p>
+                {% if database.status == "ok" %}
+                  <form class="camera-form" method="post" action="/cameras">
+                    <label class="field-label" for="camera-name">Name</label>
+                    <input id="camera-name" name="name" type="text" required maxlength="255">
+
+                    <label class="field-label" for="camera-url">RTSP endpoint</label>
+                    <input
+                      id="camera-url"
+                      name="rtsp_url"
+                      type="text"
+                      required
+                      maxlength="4096"
+                      placeholder="rtsp://camera.local:554/stream"
+                      autocomplete="off"
+                    >
+
+                    <label class="field-label" for="camera-credential-ref">Credential reference</label>
+                    <input
+                      id="camera-credential-ref"
+                      name="credential_ref"
+                      type="text"
+                      maxlength="255"
+                      placeholder="env:CAMERA_RTSP_URL or keychain:service/account"
+                      autocomplete="off"
+                    >
+
+                    <div class="form-row">
+                      <div>
+                        <label class="field-label" for="camera-transport">Transport</label>
+                        <select id="camera-transport" name="transport">
+                          <option value="tcp" selected>TCP (recommended)</option>
+                          <option value="udp">UDP</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="field-label" for="camera-stream">Preferred stream</label>
+                        <input id="camera-stream" name="preferred_stream" type="text" value="main" maxlength="100">
+                      </div>
+                    </div>
+                    <button class="save-button" type="submit">Save camera</button>
+                  </form>
+                {% else %}
+                  <p class="form-note">
+                    Run the database upgrade command before saving a camera profile.
+                  </p>
+                {% endif %}
+              </section>
+
+              <section class="card camera-safety-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Safety boundary</span>
+                    <h2>Secret handling</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">SAFE</span>
+                </div>
+                <dl class="detail-list">
+                  <div class="detail-row">
+                    <dt>SQLite</dt>
+                    <dd><strong>Redacted endpoint only</strong><small>No password or complete secret URL</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Environment</dt>
+                    <dd><strong>Reference by name</strong><small>The value is read only for a test</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Keychain</dt>
+                    <dd><strong>Reference by service/account</strong><small>macOS Keychain support is optional</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Network</dt>
+                    <dd><strong>Opened only for a test</strong><small>Runtime reconnects in the Live page</small></dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            <section class="card card-wide camera-list-card">
+              <div class="card-heading">
+                <div>
+                  <span class="eyebrow">Saved profiles</span>
+                  <h2>{{ cameras|length }} camera{% if cameras|length != 1 %}s{% endif %}</h2>
+                </div>
+                <span class="card-icon" aria-hidden="true">LIST</span>
+              </div>
+              {% if cameras %}
+                <div class="camera-grid">
+                  {% for camera in cameras %}
+                    <article class="camera-item">
+                      <div class="camera-item-heading">
+                        <div>
+                          <span class="eyebrow">{{ "Enabled" if camera.enabled else "Disabled" }}</span>
+                          <h3>{{ camera.name }}</h3>
+                        </div>
+                        <span class="camera-state">{{ camera.credential.status|replace('_', ' ')|title }}</span>
+                      </div>
+                      <dl class="detail-list">
+                        <div class="detail-row">
+                          <dt>Endpoint</dt>
+                          <dd><code>{{ camera.endpoint }}</code></dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Credential</dt>
+                          <dd>
+                            <strong>{{ camera.credential_ref or "Not configured" }}</strong>
+                            <small>{{ camera.credential.kind|title }} reference: {{ camera.credential.status|replace('_', ' ') }}</small>
+                          </dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Stream</dt>
+                          <dd><strong>{{ camera.preferred_stream }}</strong><small>{{ camera.connection_options.transport|upper }}</small></dd>
+                        </div>
+                      </dl>
+                      <div class="camera-actions">
+                        <form method="post" action="/cameras/{{ camera.id }}/test">
+                          <button class="save-button" type="submit">Test configuration</button>
+                        </form>
+                        <form method="post" action="/cameras/{{ camera.id }}/delete">
+                          <button class="quiet-button" type="submit">Delete</button>
+                        </form>
+                      </div>
+                      <details class="camera-edit">
+                        <summary>Edit profile</summary>
+                        <form class="camera-form" method="post" action="/cameras/{{ camera.id }}/edit">
+                          <label class="field-label" for="camera-name-{{ camera.id }}">Name</label>
+                          <input id="camera-name-{{ camera.id }}" name="name" type="text" required maxlength="255" value="{{ camera.name }}">
+
+                          <label class="field-label" for="camera-url-{{ camera.id }}">Replace endpoint</label>
+                          <input
+                            id="camera-url-{{ camera.id }}"
+                            name="rtsp_url"
+                            type="text"
+                            maxlength="4096"
+                            placeholder="Leave blank to keep the saved endpoint"
+                            autocomplete="off"
+                          >
+
+                          <label class="field-label" for="camera-ref-{{ camera.id }}">Credential reference</label>
+                          <input
+                            id="camera-ref-{{ camera.id }}"
+                            name="credential_ref"
+                            type="text"
+                            maxlength="255"
+                            value="{{ camera.credential_ref or '' }}"
+                            autocomplete="off"
+                          >
+
+                          <div class="form-row">
+                            <div>
+                              <label class="field-label" for="camera-transport-{{ camera.id }}">Transport</label>
+                              <select id="camera-transport-{{ camera.id }}" name="transport">
+                                <option value="tcp" {% if camera.connection_options.transport == "tcp" %}selected{% endif %}>TCP</option>
+                                <option value="udp" {% if camera.connection_options.transport == "udp" %}selected{% endif %}>UDP</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label class="field-label" for="camera-stream-{{ camera.id }}">Preferred stream</label>
+                              <input id="camera-stream-{{ camera.id }}" name="preferred_stream" type="text" value="{{ camera.preferred_stream }}" maxlength="100">
+                            </div>
+                          </div>
+                          <label class="check-field">
+                            <input name="enabled" type="checkbox" {% if camera.enabled %}checked{% endif %}>
+                            Enabled
+                          </label>
+                          <button class="save-button" type="submit">Save changes</button>
+                        </form>
+                      </details>
+                    </article>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <p class="form-note">No saved camera profiles yet.</p>
+              {% endif %}
+            </section>
+          {% elif page.key == "models" %}
+            {% if model_feedback %}
+              <div class="notice notice-{{ model_feedback.tone }}" role="status">
+                {{ model_feedback.message }}
+              </div>
+            {% endif %}
+
+            <div class="model-layout">
+              <section class="card model-form-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Secure import</span>
+                    <h2>Add model package</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">NEW</span>
+                </div>
+                <p class="form-note">
+                  Select a manifest and a ZIP archive with one <code>.mlpackage</code> directory.
+                  The package is copied through staging, checked, and then validated by the
+                  selected backend.
+                </p>
+                {% if database.status == "ok" %}
+                  <form class="model-form" method="post" action="/models/import" enctype="multipart/form-data">
+                    <label class="field-label" for="model-manifest">Manifest</label>
+                    <input id="model-manifest" name="manifest" type="file" required accept=".json,.yaml,.yml">
+
+                    <label class="field-label" for="model-archive">Model archive</label>
+                    <input id="model-archive" name="archive" type="file" required accept=".zip">
+
+                    <button class="save-button" type="submit">Import model</button>
+                  </form>
+                {% else %}
+                  <p class="form-note">
+                    Run the database upgrade command before importing a model.
+                  </p>
+                {% endif %}
+              </section>
+
+              <section class="card model-safety-card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Import boundary</span>
+                    <h2>No runtime loading</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">SAFE</span>
+                </div>
+                <dl class="detail-list">
+                  <div class="detail-row">
+                    <dt>Accepted</dt>
+                    <dd><strong>ZIP archive</strong><small>One top-level .mlpackage only</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Rejected</dt>
+                    <dd><strong>Traversal and links</strong><small>Absolute paths, symlinks, duplicates, and executable files</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Storage</dt>
+                    <dd><strong>Immutable package</strong><small>Checksum and manifest snapshot are retained</small></dd>
+                  </div>
+                  <div class="detail-row">
+                    <dt>Runtime</dt>
+                    <dd><strong>Optional Core ML</strong><small>Fake backend tests run on every platform</small></dd>
+                  </div>
+                </dl>
+              </section>
+            </div>
+
+            <section class="card card-wide model-list-card">
+              <div class="card-heading">
+                <div>
+                  <span class="eyebrow">Managed registry</span>
+                  <h2>{{ models|length }} model{% if models|length != 1 %}s{% endif %}</h2>
+                </div>
+                <span class="card-icon" aria-hidden="true">LIST</span>
+              </div>
+              {% if models %}
+                <div class="model-grid">
+                  {% for model in models %}
+                    <article class="model-item{% if model.active %} model-item-active{% endif %}">
+                      <div class="model-item-heading">
+                        <div>
+                          <span class="eyebrow">{{ "Active" if model.active else "Inactive" }}</span>
+                          <h3>{{ model.display_name }}</h3>
+                        </div>
+                        <span class="model-state">{{ model.validation_state|replace('_', ' ')|title }}</span>
+                      </div>
+                      <dl class="detail-list">
+                        <div class="detail-row">
+                          <dt>Manifest ID</dt>
+                          <dd><code>{{ model.id }}</code></dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Backend</dt>
+                          <dd>
+                            <strong>{{ model.backend }}</strong>
+                            <small>Adapter: {{ model.adapter }}</small>
+                            <small>
+                              Input:
+                              {{ model.manifest.input.width or "Unknown" }}
+                              x
+                              {{ model.manifest.input.height or "Unknown" }}
+                            </small>
+                          </dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Checksum</dt>
+                          <dd><code class="break-code">{{ model.artifact_sha256 }}</code></dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Source</dt>
+                          <dd>
+                            <strong>{{ model.source.license or "License not declared" }}</strong>
+                            <small>{{ model.source.url or "Source URL not declared" }}</small>
+                          </dd>
+                        </div>
+                        <div class="detail-row">
+                          <dt>Artifact</dt>
+                          <dd>
+                            <strong>{{ "Available" if model.artifact_exists else "Missing" }}</strong>
+                            <small><code>{{ model.artifact_path }}</code></small>
+                          </dd>
+                        </div>
+                      </dl>
+                      {% if model.validation_details.error %}
+                        <p class="model-error">{{ model.validation_details.error }}</p>
+                      {% elif model.validation_state == "runtime_valid" %}
+                        <p class="card-note">
+                          Runtime validation passed. The still-image workflow is ready.
+                        </p>
+                      {% else %}
+                        <p class="card-note">
+                          Package checks passed. Runtime validation was not run. Run it before
+                          image detection.
+                        </p>
+                      {% endif %}
+                      <details class="model-manifest">
+                        <summary>Inspect manifest snapshot</summary>
+                        <dl class="detail-list">
+                          <div class="detail-row">
+                            <dt>Task</dt>
+                            <dd><strong>{{ model.manifest.task or "Not declared" }}</strong></dd>
+                          </div>
+                          <div class="detail-row">
+                            <dt>Labels</dt>
+                            <dd><strong>{{ model.manifest.labels|join(", ") if model.manifest.labels else "Not declared" }}</strong></dd>
+                          </div>
+                          <div class="detail-row">
+                            <dt>Created</dt>
+                            <dd><strong>{{ model.created_at }}</strong></dd>
+                          </div>
+                        </dl>
+                      </details>
+                      {% if model.validation_details.inspection %}
+                        <details class="model-manifest">
+                          <summary>Inspect runtime validation</summary>
+                          <dl class="detail-list">
+                            <div class="detail-row">
+                              <dt>Runtime</dt>
+                              <dd>
+                                <strong>{{ model.validation_details.runtime_validation|replace('_', ' ')|title }}</strong>
+                                {% if model.validation_details.compute_units %}
+                                  <small>Compute units: {{ model.validation_details.compute_units }}</small>
+                                {% endif %}
+                              </dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Inputs</dt>
+                              <dd>
+                                {% for feature in model.validation_details.inspection.inputs %}
+                                  <small><code>{{ feature.name }}</code> ({{ feature.kind }})</small>
+                                {% endfor %}
+                              </dd>
+                            </div>
+                            <div class="detail-row">
+                              <dt>Outputs</dt>
+                              <dd>
+                                {% for feature in model.validation_details.inspection.outputs %}
+                                  <small><code>{{ feature.name }}</code> ({{ feature.kind }})</small>
+                                {% endfor %}
+                              </dd>
+                            </div>
+                          </dl>
+                        </details>
+                      {% endif %}
+                      <div class="model-actions">
+                        <form method="post" action="/models/{{ model.id }}/validate">
+                          <button class="save-button" type="submit">Validate package</button>
+                        </form>
+                        {% if model.active %}
+                          <form method="post" action="/models/{{ model.id }}/deactivate">
+                            <button class="quiet-button" type="submit">Deactivate</button>
+                          </form>
+                        {% elif model.validation_state == "runtime_valid" %}
+                          <form method="post" action="/models/{{ model.id }}/activate">
+                            <button class="save-button" type="submit">Activate</button>
+                          </form>
+                        {% else %}
+                          <button class="quiet-button" type="button" disabled>
+                            Runtime validation required
+                          </button>
+                        {% endif %}
+                        <form method="post" action="/models/{{ model.id }}/delete">
+                          <button class="quiet-button" type="submit">Delete</button>
+                        </form>
+                      </div>
+                      {% if model.validation_state == "runtime_valid" and model.artifact_exists %}
+                        <section class="still-image-workflow" data-model-detection>
+                          <div class="workflow-heading">
+                            <div>
+                              <span class="eyebrow">M2 still image</span>
+                              <h4>Detect one image</h4>
+                            </div>
+                            <span class="workflow-badge">NO STORAGE</span>
+                          </div>
+                          <p class="form-note">
+                            The original JPEG or PNG is returned for display. It is not saved
+                            as an artifact.
+                          </p>
+                          <form
+                            class="still-image-form"
+                            data-detection-form
+                            action="/api/v1/models/{{ model.id }}/detect-image"
+                            enctype="multipart/form-data"
+                          >
+                            <label class="field-label" for="model-image-{{ model.id }}">Image</label>
+                            <input
+                              id="model-image-{{ model.id }}"
+                              name="image"
+                              type="file"
+                              accept="image/jpeg,image/png"
+                              required
+                              data-image-input
+                            >
+                            <div class="still-image-controls">
+                              <label class="field-label" for="model-threshold-{{ model.id }}">
+                                Confidence threshold
+                              </label>
+                              <input
+                                id="model-threshold-{{ model.id }}"
+                                name="confidence_threshold"
+                                type="number"
+                                min="0"
+                                max="1"
+                                step="0.01"
+                                value="{{ model.manifest.defaults.confidence_threshold }}"
+                                data-confidence-input
+                              >
+                              <label class="field-label" for="model-compute-{{ model.id }}">
+                                Compute units
+                              </label>
+                              <select
+                                id="model-compute-{{ model.id }}"
+                                name="compute_units"
+                                data-compute-input
+                              >
+                                <option value="all">All</option>
+                                <option value="cpu_only">CPU only</option>
+                                <option value="cpu_and_gpu">CPU and GPU</option>
+                                <option value="cpu_and_ne">CPU and Neural Engine</option>
+                              </select>
+                            </div>
+                            <button class="save-button" type="submit" data-detect-button>
+                              Detect image
+                            </button>
+                          </form>
+                          <div class="still-image-status" role="status" aria-live="polite" data-detection-status>
+                            Select a plate or no-plate fixture to start.
+                          </div>
+                          <div class="still-image-result" data-detection-result hidden>
+                            <div class="still-image-stage" data-image-stage>
+                              <img data-detection-image alt="Submitted source image">
+                              <div class="detection-boxes" data-detection-boxes></div>
+                            </div>
+                            <dl class="detection-metrics">
+                              <div class="detail-row">
+                                <dt>Detections</dt>
+                                <dd data-metric="detections">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Model checksum</dt>
+                                <dd><code class="break-code" data-metric="model_checksum">-</code></dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Compute units</dt>
+                                <dd data-metric="compute_units">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Preprocessing</dt>
+                                <dd data-metric="preprocessing_ms">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Inference</dt>
+                                <dd data-metric="inference_ms">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Postprocessing</dt>
+                                <dd data-metric="postprocessing_ms">-</dd>
+                              </div>
+                              <div class="detail-row">
+                                <dt>Total</dt>
+                                <dd data-metric="total_ms">-</dd>
+                              </div>
+                            </dl>
+                          </div>
+                        </section>
+                      {% elif model.validation_state != "runtime_valid" %}
+                        <p class="workflow-disabled">
+                          Validate the model with the selected runtime before image detection.
+                        </p>
+                      {% endif %}
+                    </article>
+                  {% endfor %}
+                </div>
+              {% else %}
+                <p class="form-note">No managed model packages yet.</p>
+              {% endif %}
+            </section>
+          {% elif page.key == "system" %}
+            <div class="system-grid">
+              <section class="card card-wide">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Build identity</span>
+                    <h2>Application and schema</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">ID</span>
+                </div>
+                <div class="stat-grid">
+                  <div class="stat">
+                    <span>Application version</span>
+                    <strong>{{ app_version }}</strong>
+                  </div>
+                  <div class="stat">
+                    <span>Schema version</span>
+                    <strong>{{ database.head_revision }}</strong>
+                  </div>
+                  <div class="stat">
+                    <span>Database state</span>
+                    <strong class="value-{{ 'positive' if database.status == 'ok' else 'attention' }}">
+                      {{ database.status|replace('_', ' ')|title }}
+                    </strong>
+                  </div>
+                  <div class="stat">
+                    <span>Current revision</span>
+                    <strong>{{ database.current_revision or "None" }}</strong>
+                  </div>
+                </div>
+                <p class="card-note">{{ database.detail }}</p>
+              </section>
+
+              <section class="card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Runtime</span>
+                    <h2>Placeholder state</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">STATE</span>
+                </div>
+                <dl class="detail-list">
+                  {% for row in runtime %}
+                    <div class="detail-row">
+                      <dt>{{ row.label }}</dt>
+                      <dd>
+                        <strong>{{ row.value }}</strong>
+                        <small>{{ row.detail }}</small>
+                      </dd>
+                    </div>
+                  {% endfor %}
+                </dl>
+              </section>
+
+              <section class="card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Configuration</span>
+                    <h2>Effective settings</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">CFG</span>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr><th>Setting</th><th>Value</th><th>Source</th></tr>
+                    </thead>
+                    <tbody>
+                      {% for row in settings %}
+                        <tr>
+                          <th scope="row">{{ row.label }}</th>
+                          <td><code>{{ row.value }}</code></td>
+                          <td><span class="source-tag">{{ row.source }}</span></td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Interface</span>
+                    <h2>Display density</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">UI</span>
+                </div>
+                <p class="form-note">
+                  Choose a comfortable or compact spacing scale for the local operator console.
+                </p>
+                {% if database.status == "ok" %}
+                  <form class="preference-form" method="post" action="/system/preferences">
+                    <label class="field-label" for="ui-density">UI density</label>
+                    <div class="preference-controls">
+                      <select id="ui-density" name="density">
+                        <option value="comfortable" {% if ui_density == "comfortable" %}selected{% endif %}>
+                          Comfortable
+                        </option>
+                        <option value="compact" {% if ui_density == "compact" %}selected{% endif %}>
+                          Compact
+                        </option>
+                      </select>
+                      <button class="save-button" type="submit">Save preference</button>
+                    </div>
+                  </form>
+                {% else %}
+                  <p class="form-note">
+                    Run the database upgrade command before saving a display preference.
+                  </p>
+                {% endif %}
+              </section>
+
+              <section class="card card-wide">
+                <div class="card-heading">
+                  <div>
+                    <span class="eyebrow">Storage map</span>
+                    <h2>Managed paths</h2>
+                  </div>
+                  <span class="card-icon" aria-hidden="true">PATH</span>
+                </div>
+                <div class="path-grid">
+                  {% for row in managed_paths %}
+                    <div class="path-row">
+                      <span>{{ row.label }}</span>
+                      <code>{{ row.value }}</code>
+                    </div>
+                  {% endfor %}
+                </div>
+              </section>
+            </div>
+          {% else %}
+            <section class="empty-card">
+              <div class="empty-orbit" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="empty-copy">
+                <span class="eyebrow">Awaiting capability</span>
+                <h2>{{ page.empty_title }}</h2>
+                <p>{{ page.empty_description }}</p>
+                <span class="planned-label">Planned scope: {{ page.planned_milestone }}</span>
+              </div>
+            </section>
+            <section class="status-strip" aria-label="Current runtime state">
+              <div class="status-item">
+                <span class="status-label">Camera</span>
+                <strong>{{ global_runtime.camera }}</strong>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Model</span>
+                <strong>{{ global_runtime.model }}</strong>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Worker</span>
+                <strong>{{ global_runtime.worker }}</strong>
+              </div>
+              <div class="status-item">
+                <span class="status-label">Failures</span>
+                <strong>{{ global_runtime.failures }}</strong>
+              </div>
+            </section>
+          {% endif %}
+        </main>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,390 @@
+from __future__ import annotations
+
+import threading
+import time
+from datetime import UTC, datetime
+from typing import Any
+
+import numpy as np
+import pytest
+
+from open_licenseplate.cameras.service import prepare_camera_config
+from open_licenseplate.capture import (
+    CameraRuntime,
+    FakeFrameSource,
+    LatestFrameBroker,
+    ReconnectBackoff,
+    make_preview_frame,
+)
+from open_licenseplate.inference import ModelDescriptor
+from open_licenseplate.inference.backends import FakeBackend
+from open_licenseplate.live import (
+    LivePipelineConflict,
+    LivePipelineCoordinator,
+    SourcePixelRegionOfInterest,
+)
+from open_licenseplate.models.manifest import parse_manifest
+
+
+def _descriptor(model_id: str = "model-1") -> ModelDescriptor:
+    manifest = parse_manifest(
+        {
+            "schema_version": 1,
+            "id": model_id,
+            "display_name": "Test model",
+            "task": "object_detection",
+            "backend": "coreml",
+            "adapter": "ultralytics_yolo_nms",
+            "artifact": "model.mlpackage",
+            "artifact_sha256": "a" * 64,
+            "input": {
+                "name": "image",
+                "kind": "image",
+                "width": 8,
+                "height": 8,
+                "color_space": "rgb",
+            },
+            "preprocessing": {"resize": "stretch"},
+            "outputs": {
+                "boxes": "coordinates",
+                "scores": "confidence",
+                "box_format": "xyxy",
+                "coordinate_space": "model_pixels",
+            },
+            "labels": ["license_plate"],
+            "defaults": {"confidence_threshold": 0.35, "iou_threshold": 0.45},
+        }
+    )
+    return ModelDescriptor(
+        model_id=model_id,
+        artifact_path="/managed/model.mlpackage",
+        artifact_sha256=manifest.artifact_sha256,
+        manifest=manifest,
+    )
+
+
+def _camera(name: str = "Fixture") -> Any:
+    return prepare_camera_config(
+        name=name,
+        rtsp_url="rtsp://fixture.local/live",
+    )
+
+
+def _outputs(_prepared: Any) -> dict[str, Any]:
+    return {
+        "coordinates": np.array([[0, 0, 8, 8]], dtype=np.float32),
+        "confidence": np.array([0.8], dtype=np.float32),
+    }
+
+
+class ManualClock:
+    def __init__(self) -> None:
+        self.wall = datetime(2026, 8, 29, tzinfo=UTC)
+        self.ticks = 0.0
+
+    def now(self) -> datetime:
+        return self.wall
+
+    def monotonic(self) -> float:
+        return self.ticks
+
+    def advance(self, seconds: float) -> None:
+        self.ticks += seconds
+
+
+def _runtime(
+    sources: list[FakeFrameSource],
+    *,
+    clock: Any | None = None,
+    read_gate: threading.Event | None = None,
+) -> CameraRuntime:
+    def source_factory(camera: Any, camera_id: str) -> FakeFrameSource:
+        source = FakeFrameSource(
+            [np.full((8, 8, 3), 40, dtype=np.uint8)],
+            camera_id=camera_id,
+            repeat=True,
+            read_interval_seconds=0.002,
+            clock=clock,
+            read_gate=read_gate,
+        )
+        sources.append(source)
+        return source
+
+    return CameraRuntime(source_factory, clock=clock, poll_interval_seconds=0.002)
+
+
+def _wait_processed(
+    coordinator: LivePipelineCoordinator,
+    *,
+    count: int = 1,
+    timeout: float = 2.0,
+) -> Any:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = coordinator.status()
+        if status.metrics.processed_frames >= count:
+            return status
+        time.sleep(0.005)
+    raise AssertionError("live pipeline did not process the expected frame count")
+
+
+def test_live_pipeline_warms_processes_current_frame_updates_threshold_and_stops() -> None:
+    sources: list[FakeFrameSource] = []
+    runtime = _runtime(sources)
+    backend = FakeBackend(output_factory=_outputs)
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: backend,
+        poll_interval_seconds=0.002,
+        epoch_factory=iter(("epoch-1", "epoch-2")).__next__,
+    )
+
+    started = coordinator.start("camera-1", _camera(), _descriptor())
+    assert started.state == "starting"
+    warming = coordinator.wait_for_state("warming")
+    assert "warming" in warming.state_history
+    running = coordinator.wait_for_state("running")
+    assert running.metrics.warmup_ms is not None
+
+    processed = _wait_processed(coordinator)
+    assert processed.last_result is not None
+    assert processed.last_result.camera_id == "camera-1"
+    assert processed.last_result.model_id == "model-1"
+    assert processed.last_result.capture_session_id
+    assert processed.last_result.epoch == processed.epoch
+    assert processed.last_result.frame_sequence >= 1
+    assert (
+        processed.last_result.detections[0].frame_sequence == processed.last_result.frame_sequence
+    )
+
+    updated = coordinator.update_threshold(0.9)
+    assert updated.confidence_threshold == 0.9
+    hidden = _wait_processed(coordinator, count=processed.metrics.processed_frames + 1)
+    assert hidden.last_result is not None
+    assert hidden.last_result.detections == ()
+    assert hidden.metrics.source_replacement_count >= 0
+
+    stopped = coordinator.stop()
+    assert stopped.state == "stopped"
+    assert sources and sources[0].closed.is_set()
+    assert backend.closes
+    assert backend.closes[-1].closed is True
+
+
+def test_live_pipeline_rejects_camera_and_model_switch_while_running() -> None:
+    sources: list[FakeFrameSource] = []
+    runtime = _runtime(sources)
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: FakeBackend(output_factory=_outputs),
+        poll_interval_seconds=0.002,
+    )
+    coordinator.start("camera-1", _camera(), _descriptor("model-1"))
+    coordinator.wait_for_state("running")
+
+    with pytest.raises(LivePipelineConflict, match="switching the camera"):
+        coordinator.start("camera-2", _camera("Second"), _descriptor("model-1"))
+    with pytest.raises(LivePipelineConflict, match="switching the model"):
+        coordinator.start("camera-1", _camera(), _descriptor("model-2"))
+
+    coordinator.stop()
+
+
+def test_live_pipeline_restores_detection_coordinates_from_source_pixel_roi() -> None:
+    sources: list[FakeFrameSource] = []
+    runtime = _runtime(sources)
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: FakeBackend(output_factory=_outputs),
+        poll_interval_seconds=0.002,
+    )
+    coordinator.start(
+        "camera-1",
+        _camera(),
+        _descriptor(),
+        region_of_interest=SourcePixelRegionOfInterest(2, 1, 4, 4),
+    )
+    coordinator.wait_for_state("running")
+
+    processed = _wait_processed(coordinator)
+    assert processed.last_result is not None
+    assert processed.last_result.detections[0].box_xyxy == (2.0, 1.0, 6.0, 5.0)
+    coordinator.stop()
+
+
+def test_live_pipeline_replaces_old_frames_during_slow_inference() -> None:
+    sources: list[FakeFrameSource] = []
+
+    def slow_outputs(_prepared: Any) -> dict[str, Any]:
+        time.sleep(0.04)
+        return _outputs(_prepared)
+
+    runtime = _runtime(sources)
+    backend = FakeBackend(output_factory=slow_outputs)
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: backend,
+        poll_interval_seconds=0.002,
+    )
+    coordinator.start("camera-1", _camera(), _descriptor())
+    coordinator.wait_for_state("running")
+    processed = _wait_processed(coordinator, count=2, timeout=3)
+
+    assert processed.metrics.inference_replacement_count > 0
+    assert processed.metrics.processed_frames >= 2
+    assert processed.metrics.capture_age_ms is not None
+    assert processed.metrics.end_to_end_ms is not None
+    coordinator.stop()
+
+
+def test_live_pipeline_publishes_new_epoch_after_reconnect_without_old_units() -> None:
+    release_failure = threading.Event()
+    sources: list[FakeFrameSource] = []
+    factory_calls = 0
+
+    class GateBeforeFailureSource(FakeFrameSource):
+        def read(self) -> Any:
+            if self._frame_index >= 1:
+                release_failure.wait(2)
+            return super().read()
+
+    def source_factory(camera: Any, camera_id: str) -> FakeFrameSource:
+        nonlocal factory_calls
+        del camera
+        if factory_calls == 0:
+            source = GateBeforeFailureSource(
+                (make_preview_frame(40),),
+                camera_id=camera_id,
+                fail_at=1,
+                read_error="controlled reconnect",
+            )
+        else:
+            source = FakeFrameSource(
+                (make_preview_frame(80),),
+                camera_id=camera_id,
+                repeat=True,
+                read_interval_seconds=0.001,
+            )
+        factory_calls += 1
+        sources.append(source)
+        return source
+
+    runtime = CameraRuntime(
+        source_factory,
+        backoff=ReconnectBackoff(
+            base_delay_seconds=0.01,
+            cap_seconds=0.01,
+            jitter_ratio=0,
+            random_value=lambda: 0.5,
+        ),
+        stable_stream_seconds=0.1,
+        poll_interval_seconds=0.001,
+        degraded_hold_seconds=0.001,
+    )
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: FakeBackend(output_factory=_outputs),
+        poll_interval_seconds=0.001,
+        epoch_factory=iter(("epoch-1", "epoch-2")).__next__,
+    )
+    try:
+        coordinator.start("camera-1", _camera(), _descriptor())
+        subscription = coordinator.subscribe_display()
+        assert subscription is not None
+        first = subscription.get(timeout=5)
+        assert first is not None
+        assert first.stream_epoch == "epoch-1"
+        assert first.capture_session_id == sources[0].capture_session_id
+        release_failure.set()
+        deadline = time.monotonic() + 5
+        second = None
+        while time.monotonic() < deadline:
+            current = subscription.get(timeout=0.25)
+            if current is None:
+                continue
+            if current.stream_epoch == "epoch-2":
+                second = current
+                break
+            assert current.stream_epoch == "epoch-1"
+        assert second is not None
+        assert first.capture_session_id != second.capture_session_id
+        assert second.frame_sequence >= 1
+        for _ in range(2):
+            current = subscription.get(timeout=1)
+            assert current is not None
+            assert current.stream_epoch == "epoch-2"
+            assert current.capture_session_id == second.capture_session_id
+        subscription.close()
+    finally:
+        coordinator.close()
+
+
+def test_end_to_end_metric_includes_capture_wait_and_slow_prediction() -> None:
+    sources: list[FakeFrameSource] = []
+    clock = ManualClock()
+    read_gate = threading.Event()
+    prediction_calls = 0
+
+    def slow_outputs(_prepared: Any) -> dict[str, Any]:
+        nonlocal prediction_calls
+        prediction_calls += 1
+        if prediction_calls > 1:
+            clock.advance(2.0)
+        return _outputs(_prepared)
+
+    runtime = _runtime(sources, clock=clock, read_gate=read_gate)
+    coordinator = LivePipelineCoordinator(
+        runtime,
+        lambda: FakeBackend(output_factory=slow_outputs),
+        clock=clock,
+        poll_interval_seconds=0.002,
+    )
+    coordinator.start("camera-1", _camera(), _descriptor())
+    coordinator.wait_for_state("running")
+    clock.advance(1.0)
+    read_gate.set()
+
+    processed = _wait_processed(coordinator)
+    assert processed.metrics.end_to_end_ms is not None
+    assert processed.metrics.end_to_end_ms >= 2000.0
+    stage_total = sum(
+        value or 0.0
+        for value in (
+            processed.metrics.preprocessing_ms,
+            processed.metrics.prediction_ms,
+            processed.metrics.postprocessing_ms,
+        )
+    )
+    assert processed.metrics.end_to_end_ms >= stage_total
+    coordinator.stop()
+
+
+def test_latest_frame_inference_handoff_is_capacity_one() -> None:
+    broker = LatestFrameBroker()
+    subscription = broker.subscribe()
+    frames = [_frame(sequence, received_monotonic=float(sequence)) for sequence in range(1, 4)]
+    for frame in frames:
+        assert broker.put(frame)
+
+    assert subscription.metrics().replaced_frames == 2
+    current = subscription.get(timeout=0)
+    assert current is not None
+    assert current.sequence == 3
+    assert subscription.get(timeout=0) is None
+    subscription.close()
+    broker.close()
+
+
+def _frame(sequence: int, *, received_monotonic: float) -> Any:
+    from open_licenseplate.capture import VideoFrame
+
+    return VideoFrame(
+        sequence=sequence,
+        data=np.zeros((2, 2, 3), dtype=np.uint8),
+        pixel_format="bgr24",
+        host_received_at=datetime(2026, 8, 29, tzinfo=UTC),
+        host_received_monotonic=received_monotonic,
+        capture_session_id="session-1",
+        width=2,
+        height=2,
+    )

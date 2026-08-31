@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling>=1.25,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-licenseplate"
+version = "0.1.0"
+description = "Local-first license plate detection application"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+authors = [{ name = "open-licenseplate contributors" }]
+dependencies = [
+    "alembic>=1.14,<2",
+    "av>=14,<17",
+    "coremltools>=8,<9; sys_platform == 'darwin'",
+    "fastapi>=0.115,<1",
+    "jinja2>=3.1,<4",
+    "numpy>=2,<3",
+    "platformdirs>=4.3,<5",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "python-multipart>=0.0.20,<1",
+    "Pillow>=11,<13",
+    "sqlalchemy>=2.0,<3",
+    "supervision>=0.26,<0.31",
+    "uvicorn>=0.32,<1",
+    "websockets>=13,<16",
+    "PyYAML>=6.0,<7",
+]
+
+[project.scripts]
+open-licenseplate = "open_licenseplate.cli:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1",
+    "mypy>=1.13,<2",
+    "playwright>=1.49,<2",
+    "pytest>=8.3,<9",
+    "ruff>=0.8,<1",
+    "types-PyYAML>=6.0.12,<7",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/open_licenseplate"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+    "browser: tests that exercise the shell in a real browser",
+    "integration: tests that exercise application boundaries",
+    "macos: tests that require macOS or Apple Silicon runtime support",
+    "m0_acceptance: the complete M0 operator workflow",
+    "m2_acceptance: the complete M2 still-image workflow",
+    "m3_acceptance: the complete M3 live replay and lifecycle workflow",
+    "m4_a_acceptance: the M4-A tracking and closed-event replay workflow",
+    "m4_b_acceptance: the M4-B crop artifact and event transaction workflow",
+    "m4_c_acceptance: the M4-C event review and managed crop workflow",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+exclude = "^tests/"

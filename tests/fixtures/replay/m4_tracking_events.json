@@ -1,0 +1,77 @@
+{
+  "fixture_id": "m4-a-tracking-events",
+  "base_utc": "2026-08-30T00:00:00Z",
+  "camera_id": "fixture-camera",
+  "model_id": "fixture-model",
+  "model_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "frame_width": 64,
+  "frame_height": 48,
+  "passes": [
+    {
+      "name": "known_plate_pass",
+      "capture_session_id": "fixture-session-known",
+      "generation_number": 1,
+      "stream_epoch": "fixture-epoch-known",
+      "frames": [
+        {
+          "offset_seconds": 0.0,
+          "frame_sequence": 1,
+          "confidence": 0.81,
+          "box_xyxy": [8.0, 8.0, 24.0, 18.0]
+        },
+        {
+          "offset_seconds": 0.1,
+          "frame_sequence": 2,
+          "confidence": 0.88,
+          "box_xyxy": [9.0, 8.0, 25.0, 18.0]
+        },
+        {
+          "offset_seconds": 0.2,
+          "frame_sequence": 3,
+          "confidence": 0.93,
+          "box_xyxy": [10.0, 8.0, 26.0, 18.0]
+        }
+      ]
+    },
+    {
+      "name": "no_plate_pass",
+      "capture_session_id": "fixture-session-empty",
+      "generation_number": 2,
+      "stream_epoch": "fixture-epoch-empty",
+      "frames": [
+        {
+          "offset_seconds": 0.0,
+          "frame_sequence": 1
+        },
+        {
+          "offset_seconds": 0.1,
+          "frame_sequence": 2
+        },
+        {
+          "offset_seconds": 0.2,
+          "frame_sequence": 3
+        }
+      ]
+    },
+    {
+      "name": "short_false_candidate",
+      "capture_session_id": "fixture-session-short",
+      "generation_number": 3,
+      "stream_epoch": "fixture-epoch-short",
+      "frames": [
+        {
+          "offset_seconds": 0.0,
+          "frame_sequence": 1,
+          "confidence": 0.65,
+          "box_xyxy": [8.0, 8.0, 24.0, 18.0]
+        },
+        {
+          "offset_seconds": 0.1,
+          "frame_sequence": 2,
+          "confidence": 0.67,
+          "box_xyxy": [9.0, 8.0, 25.0, 18.0]
+        }
+      ]
+    }
+  ]
+}
