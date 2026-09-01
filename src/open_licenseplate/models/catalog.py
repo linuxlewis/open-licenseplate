@@ -88,6 +88,10 @@ class CatalogInstallBusyError(CatalogError):
     """Raised when another process holds the same catalog install lock."""
 
 
+class CatalogInstallCancelledError(CatalogError):
+    """Raised when an install is cancelled while waiting for its lock."""
+
+
 @dataclass(frozen=True)
 class CatalogEntry:
     """One fixed catalog entry loaded from committed metadata."""
@@ -136,6 +140,7 @@ class CatalogDownloader(Protocol):
         expected_size: int,
         destination: BinaryIO,
         cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> None:
         """Stream one fixed catalog asset into a private destination."""
 
@@ -148,8 +153,18 @@ class CatalogInstallLocks:
         self._locks: dict[tuple[Path, str], threading.Lock] = {}
 
     @contextmanager
-    def acquire(self, catalog_id: str, data_directory: Path) -> Iterator[None]:
+    def acquire(
+        self,
+        catalog_id: str,
+        data_directory: Path,
+        *,
+        deadline: float | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> Iterator[None]:
         """Hold the lock for one catalog entry until its install finishes."""
+        effective_deadline = (
+            deadline if deadline is not None else time.monotonic() + CATALOG_INSTALL_LOCK_TIMEOUT
+        )
         lock_directory = data_directory / _CATALOG_INSTALL_LOCK_DIRECTORY
         _ensure_private_lock_directory(lock_directory)
         resolved_directory = lock_directory.resolve()
@@ -158,7 +173,8 @@ class CatalogInstallLocks:
                 (resolved_directory, catalog_id),
                 threading.Lock(),
             )
-        with lock:
+        _acquire_thread_lock(lock, effective_deadline, cancel_event)
+        try:
             lock_path = lock_directory / f"{catalog_id}.lock"
             lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             file_descriptor = os.open(
@@ -168,13 +184,19 @@ class CatalogInstallLocks:
             )
             try:
                 os.chmod(lock_path, 0o600, follow_symlinks=False)
-                _acquire_process_lock(file_descriptor)
+                _acquire_process_lock(
+                    file_descriptor,
+                    effective_deadline,
+                    cancel_event,
+                )
                 try:
                     yield
                 finally:
                     fcntl.flock(file_descriptor, fcntl.LOCK_UN)
             finally:
                 os.close(file_descriptor)
+        finally:
+            lock.release()
 
 
 _DEFAULT_INSTALL_LOCKS = CatalogInstallLocks()
@@ -206,10 +228,11 @@ class FixedCatalogDownloader:
         expected_size: int,
         destination: BinaryIO,
         cancel_event: threading.Event | None = None,
+        deadline: float | None = None,
     ) -> None:
         """Download one exact-size asset and reject unsafe redirect chains."""
         current_url = validate_catalog_url(url, archive_asset)
-        deadline = time.monotonic() + self.total_timeout
+        deadline = deadline if deadline is not None else time.monotonic() + self.total_timeout
         for redirect_count in range(self.max_redirects + 1):
             connection: Any | None = None
             response: Any | None = None
@@ -353,8 +376,14 @@ def install_catalog_model(
     """
     effective_locks = install_locks or _DEFAULT_INSTALL_LOCKS
     effective_cancel_event = cancel_event or threading.Event()
+    deadline = time.monotonic() + CATALOG_TOTAL_TIMEOUT
     paths.ensure_directories()
-    with effective_locks.acquire(entry.catalog_id, paths.data_dir):
+    with effective_locks.acquire(
+        entry.catalog_id,
+        paths.data_dir,
+        deadline=deadline,
+        cancel_event=effective_cancel_event,
+    ):
         return _install_catalog_model_locked(
             catalog=catalog,
             entry=entry,
@@ -362,6 +391,7 @@ def install_catalog_model(
             repository=repository,
             downloader=downloader,
             cancel_event=effective_cancel_event,
+            deadline=deadline,
         )
 
 
@@ -373,6 +403,7 @@ def _install_catalog_model_locked(
     repository: ModelRepository,
     downloader: CatalogDownloader,
     cancel_event: threading.Event,
+    deadline: float,
 ) -> tuple[Model, bool]:
     """Run one serialized catalog install with atomic staging cleanup."""
     _check_cancelled(cancel_event)
@@ -389,6 +420,7 @@ def _install_catalog_model_locked(
             "a managed model with this catalog id already exists with different provenance"
         )
 
+    _remove_orphaned_model_directory(paths, entry.manifest.model_id)
     try:
         paths.ensure_directories()
         _ensure_private_staging(paths.staging)
@@ -405,6 +437,7 @@ def _install_catalog_model_locked(
                 expected_size=entry.archive_size,
                 destination=staging_file,
                 cancel_event=cancel_event,
+                deadline=deadline,
             )
         except CatalogError:
             raise
@@ -420,7 +453,7 @@ def _install_catalog_model_locked(
             os.fsync(staging_file.fileno())
         except (OSError, ValueError) as error:
             raise CatalogDownloadError("catalog staging write failed") from error
-        _check_cancelled(cancel_event)
+        _check_download_state(deadline, cancel_event)
         _verify_downloaded_archive(
             staging_file,
             expected_size=entry.archive_size,
@@ -498,26 +531,54 @@ def catalog_model_is_installed(
         return False
 
 
-def reconcile_orphaned_model_directories(paths: ManagedPaths) -> int:
+def _remove_orphaned_model_directory(paths: ManagedPaths, model_id: str) -> None:
+    """Remove one interrupted model import after its catalog lock is held."""
+    if paths.models.is_symlink() or not paths.models.is_dir():
+        raise CatalogError("managed model directory is not safe")
+    model_directory = paths.models / model_id
+    if not model_directory.exists() and not model_directory.is_symlink():
+        return
+    ManagedPaths.validate_contained_path(model_directory, paths.models)
+    _remove_orphan_model_entry(model_directory)
+
+
+def reconcile_orphaned_model_directories(
+    paths: ManagedPaths,
+    install_locks: CatalogInstallLocks | None = None,
+) -> int:
     """Remove model directories left by an interrupted import with no DB row."""
     if paths.models.is_symlink() or not paths.models.is_dir():
         raise CatalogError("managed model directory is not safe")
     if database_status(paths.database)["status"] != "ok":
         return 0
+    effective_locks = install_locks or _DEFAULT_INSTALL_LOCKS
     database = Database(paths.database)
     try:
-        known_ids = {model.id for model in ModelRepository(database).list()}
+        repository = ModelRepository(database)
+        candidates = tuple(paths.models.iterdir())
+        removed = 0
+        for child in candidates:
+            try:
+                with effective_locks.acquire(
+                    child.name,
+                    paths.data_dir,
+                    deadline=time.monotonic() + CATALOG_INSTALL_LOCK_TIMEOUT,
+                ):
+                    if repository.get(child.name) is not None:
+                        continue
+                    if not child.exists() and not child.is_symlink():
+                        continue
+                    ManagedPaths.validate_contained_path(child, paths.models)
+                    _remove_orphan_model_entry(child)
+                    removed += 1
+            except CatalogInstallBusyError:
+                logger.warning(
+                    "skipping orphan model cleanup while install is active",
+                    extra={"model_id": child.name},
+                )
+        return removed
     finally:
         database.dispose()
-
-    removed = 0
-    for child in tuple(paths.models.iterdir()):
-        if child.name in known_ids:
-            continue
-        ManagedPaths.validate_contained_path(child, paths.models)
-        _remove_orphan_model_entry(child)
-        removed += 1
-    return removed
 
 
 def validate_catalog_url(url: str, archive_asset: str) -> str:
@@ -845,17 +906,54 @@ def _ensure_private_lock_directory(lock_directory: Path) -> None:
         raise CatalogError("catalog install lock directory is not private")
 
 
-def _acquire_process_lock(file_descriptor: int) -> None:
-    deadline = time.monotonic() + CATALOG_INSTALL_LOCK_TIMEOUT
+def _acquire_thread_lock(
+    lock: threading.Lock,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> None:
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CatalogInstallCancelledError("catalog install was cancelled") from None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CatalogInstallBusyError("catalog install is already in progress") from None
+        if lock.acquire(timeout=min(CATALOG_INSTALL_LOCK_POLL, remaining)):
+            return
+
+
+def _acquire_process_lock(
+    file_descriptor: int,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> None:
+    while True:
+        _check_lock_wait_state(deadline, cancel_event)
         try:
             fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return
         except BlockingIOError:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise CatalogInstallBusyError("catalog install is already in progress") from None
-            time.sleep(min(CATALOG_INSTALL_LOCK_POLL, remaining))
+            _check_lock_wait_state(deadline, cancel_event)
+            remaining = _remaining_lock_time(deadline)
+            time.sleep(
+                min(
+                    CATALOG_INSTALL_LOCK_POLL,
+                    remaining,
+                )
+            )
+
+
+def _check_lock_wait_state(
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise CatalogInstallCancelledError("catalog install was cancelled") from None
+    if _remaining_lock_time(deadline) <= 0:
+        raise CatalogInstallBusyError("catalog install is already in progress") from None
+
+
+def _remaining_lock_time(deadline: float) -> float:
+    return deadline - time.monotonic()
 
 
 def _ensure_private_staging(staging_directory: Path) -> None:

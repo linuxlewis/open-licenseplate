@@ -123,6 +123,7 @@ def create_app(
     backend_factory = inference_backend_factory or CoreMLBackend
     effective_model_catalog = model_catalog or load_model_catalog()
     effective_catalog_downloader = catalog_downloader or FixedCatalogDownloader()
+    effective_catalog_install_locks = CatalogInstallLocks()
 
     def effective_event_sink(event: Any) -> None:
         if event_sink is not None:
@@ -145,7 +146,11 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         paths.ensure_directories()
         await asyncio.to_thread(artifact_service.reconcile)
-        await asyncio.to_thread(reconcile_orphaned_model_directories, paths)
+        await asyncio.to_thread(
+            reconcile_orphaned_model_directories,
+            paths,
+            effective_catalog_install_locks,
+        )
         configure_logging(level=effective_settings.log_level, log_file=paths.app_log)
         application.state.startup_complete = True
         logger.info(
@@ -179,7 +184,7 @@ def create_app(
     application.state.artifact_service = artifact_service
     application.state.model_catalog = effective_model_catalog
     application.state.catalog_downloader = effective_catalog_downloader
-    application.state.catalog_install_locks = CatalogInstallLocks()
+    application.state.catalog_install_locks = effective_catalog_install_locks
     application.state.detector_registry = DetectorRegistry(backend_factory)
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)

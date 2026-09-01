@@ -26,6 +26,8 @@ from open_licenseplate.models.catalog import (
     CATALOG_ROOT,
     CatalogEntry,
     CatalogError,
+    CatalogInstallBusyError,
+    CatalogInstallCancelledError,
     CatalogInstallLocks,
     FixedCatalogDownloader,
     ModelCatalog,
@@ -60,8 +62,9 @@ class FakeDownloader:
         expected_size: int,
         destination: Any,
         cancel_event: Any = None,
+        deadline: float | None = None,
     ) -> None:
-        del cancel_event
+        del cancel_event, deadline
         assert self.calls is not None
         self.calls.append(
             {
@@ -94,8 +97,9 @@ class ProcessDownloader:
         expected_size: int,
         destination: Any,
         cancel_event: Any = None,
+        deadline: float | None = None,
     ) -> None:
-        del url, archive_asset, expected_size, cancel_event
+        del url, archive_asset, expected_size, cancel_event, deadline
         with self.marker_path.open("ab") as marker:
             marker.write(b"download\n")
         time.sleep(self.delay_seconds)
@@ -138,6 +142,71 @@ def _hold_process_catalog_lock(
     with locks.acquire("license-plate-yolov11n", data_directory):
         ready_event.set()
         time.sleep(30)
+
+
+def _make_readonly_orphan(
+    data_directory: Path,
+    model_id: str,
+    artifact: str,
+) -> Path:
+    paths = ManagedPaths.from_roots(data_directory, data_directory / "logs")
+    paths.ensure_directories()
+    orphan = paths.models / model_id
+    package = orphan / artifact
+    (package / "Data").mkdir(parents=True)
+    (package / "Manifest.json").write_text("{}", encoding="utf-8")
+    (package / "Data" / "weights.bin").write_bytes(b"interrupted import")
+    (package / "Manifest.json").chmod(0o400)
+    (package / "Data" / "weights.bin").chmod(0o400)
+    (package / "Data").chmod(0o500)
+    package.chmod(0o500)
+    orphan.chmod(0o500)
+    return orphan
+
+
+def _create_process_orphan(
+    data_directory: Path,
+    model_id: str,
+    artifact: str,
+    ready_event: Any,
+) -> None:
+    _make_readonly_orphan(data_directory, model_id, artifact)
+    ready_event.set()
+    time.sleep(30)
+
+
+def _run_process_cleanup(
+    data_directory: Path,
+    log_directory: Path,
+    started_event: Any,
+    result_queue: Any,
+) -> None:
+    try:
+        paths = ManagedPaths.from_roots(data_directory, log_directory)
+        started_event.set()
+        count = reconcile_orphaned_model_directories(paths, CatalogInstallLocks())
+        result_queue.put(("ok", count))
+    except BaseException as error:
+        result_queue.put(("error", type(error).__name__, str(error)))
+
+
+def _wait_for_catalog_lock(
+    locks: CatalogInstallLocks,
+    data_directory: Path,
+    deadline: float,
+    cancel_event: threading.Event | None,
+    result: list[str],
+) -> None:
+    try:
+        with locks.acquire(
+            "license-plate-yolov11n",
+            data_directory,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        ):
+            result.append("acquired")
+    except (CatalogInstallBusyError, CatalogInstallCancelledError) as error:
+        result.append(type(error).__name__)
 
 
 class FakeResponse:
@@ -492,6 +561,134 @@ def test_catalog_lock_is_released_when_process_terminates(tmp_path: Path) -> Non
         pass
 
 
+def test_startup_cleanup_waits_for_an_active_cross_process_install(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    orphan = _make_readonly_orphan(
+        paths.data_dir,
+        "license-plate-yolov11n",
+        "license-plate-yolov11n.mlpackage",
+    )
+    context = multiprocessing.get_context("spawn")
+    holder_ready = context.Event()
+    cleanup_started = context.Event()
+    result_queue = context.Queue()
+    holder = context.Process(
+        target=_hold_process_catalog_lock,
+        args=(paths.data_dir, holder_ready),
+    )
+    cleanup = context.Process(
+        target=_run_process_cleanup,
+        args=(
+            paths.data_dir,
+            paths.log_dir,
+            cleanup_started,
+            result_queue,
+        ),
+    )
+    holder.start()
+    assert holder_ready.wait(5)
+    cleanup.start()
+    assert cleanup_started.wait(5)
+    time.sleep(0.2)
+    assert orphan.exists()
+    holder.terminate()
+    holder.join(5)
+    cleanup.join(10)
+
+    assert cleanup.exitcode == 0
+    assert result_queue.get(timeout=1) == ("ok", 1)
+    assert not orphan.exists()
+
+
+def test_catalog_install_repairs_an_orphan_from_an_interrupted_commit(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    context = multiprocessing.get_context("spawn")
+    orphan_ready = context.Event()
+    orphan_process = context.Process(
+        target=_create_process_orphan,
+        args=(
+            paths.data_dir,
+            catalog.entries[0].manifest.model_id,
+            catalog.entries[0].manifest.artifact,
+            orphan_ready,
+        ),
+    )
+    orphan_process.start()
+    assert orphan_ready.wait(5)
+    orphan_process.terminate()
+    orphan_process.join(5)
+    assert orphan_process.exitcode is not None
+
+    downloader = FakeDownloader(archive_bytes)
+    with TestClient(
+        create_app(
+            settings,
+            model_catalog=catalog,
+            catalog_downloader=downloader,
+        )
+    ) as client:
+        response = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
+
+    assert response.status_code == 201, response.text
+    assert response.json()["active"] is False
+    assert len(downloader.calls or []) == 1
+    _assert_staging_empty(settings)
+
+
+def test_catalog_local_lock_wait_stops_on_deadline_and_cancellation(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    locks = CatalogInstallLocks()
+    deadline_result: list[str] = []
+    cancellation_result: list[str] = []
+
+    with locks.acquire(
+        "license-plate-yolov11n",
+        paths.data_dir,
+        deadline=time.monotonic() + 5,
+    ):
+        deadline_thread = threading.Thread(
+            target=_wait_for_catalog_lock,
+            args=(
+                locks,
+                paths.data_dir,
+                time.monotonic() + 0.1,
+                None,
+                deadline_result,
+            ),
+        )
+        deadline_thread.start()
+        deadline_thread.join(1)
+
+        cancel_event = threading.Event()
+        cancellation_thread = threading.Thread(
+            target=_wait_for_catalog_lock,
+            args=(
+                locks,
+                paths.data_dir,
+                time.monotonic() + 5,
+                cancel_event,
+                cancellation_result,
+            ),
+        )
+        cancellation_thread.start()
+        time.sleep(0.05)
+        cancel_event.set()
+        cancellation_thread.join(1)
+
+    assert deadline_result == [CatalogInstallBusyError.__name__]
+    assert cancellation_result == [CatalogInstallCancelledError.__name__]
+
+
 def test_catalog_list_and_install_reject_a_damaged_installed_artifact(
     tmp_path: Path,
 ) -> None:
@@ -652,8 +849,9 @@ def test_catalog_download_does_not_reopen_replaceable_staging_path(
             expected_size: int,
             destination: Any,
             cancel_event: Any = None,
+            deadline: float | None = None,
         ) -> None:
-            del url, archive_asset, expected_size, cancel_event
+            del url, archive_asset, expected_size, cancel_event, deadline
             staging_path = next(paths.staging.iterdir())
             outside.write_bytes(b"outside")
             staging_path.unlink()
