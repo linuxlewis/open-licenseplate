@@ -13,6 +13,7 @@ import yaml
 
 SUPPORTED_ADAPTERS = frozenset({"ultralytics_yolo_nms"})
 SUPPORTED_BACKENDS = frozenset({"coreml"})
+SUPPORTED_INPUT_ROLES = frozenset({"confidence_threshold", "iou_threshold"})
 MANIFEST_SCHEMA_VERSION = 1
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -178,7 +179,7 @@ def _required_mapping(value: Any, field_name: str) -> Mapping[str, Any]:
 
 def _validate_input(value: Any) -> None:
     values = _required_mapping(value, "input")
-    _required_section_text(values, "input", "name", max_length=255)
+    input_name = _required_section_text(values, "input", "name", max_length=255)
     if _required_section_text(values, "input", "kind", max_length=32) != "image":
         raise ModelManifestError("manifest input.kind must be image")
     for field_name in ("width", "height"):
@@ -190,6 +191,73 @@ def _validate_input(value: Any) -> None:
     color_space = _required_section_text(values, "input", "color_space", max_length=32)
     if color_space not in {"rgb", "bgr", "grayscale"}:
         raise ModelManifestError("manifest input.color_space is not supported")
+    _validate_additional_inputs(values.get("additional_inputs"), input_name)
+
+
+def _validate_additional_inputs(value: Any, input_name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise ModelManifestError("manifest input.additional_inputs must be a list")
+
+    roles: set[str] = set()
+    names = {input_name}
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ModelManifestError("manifest input.additional_inputs must contain objects")
+        role = _required_section_text(
+            item,
+            "input.additional_inputs",
+            "role",
+            max_length=64,
+        )
+        if role not in SUPPORTED_INPUT_ROLES:
+            raise ModelManifestError("manifest input.additional_inputs.role is not supported")
+        if role in roles:
+            raise ModelManifestError(
+                "manifest input.additional_inputs.role must not contain duplicates"
+            )
+        roles.add(role)
+
+        name = _required_section_text(
+            item,
+            "input.additional_inputs",
+            "name",
+            max_length=255,
+        )
+        if name in names:
+            raise ModelManifestError("manifest input.additional_inputs.name must be unique")
+        names.add(name)
+
+        kind = _required_section_text(
+            item,
+            "input.additional_inputs",
+            "kind",
+            max_length=32,
+        )
+        if kind != "double":
+            raise ModelManifestError("manifest input.additional_inputs.kind must be double")
+
+        if "shape" in item and item["shape"] != []:
+            raise ModelManifestError(
+                "manifest input.additional_inputs.shape must be empty for scalar values"
+            )
+
+        optional = item.get("optional")
+        if not isinstance(optional, bool):
+            raise ModelManifestError("manifest input.additional_inputs.optional must be boolean")
+
+        if "default" not in item:
+            raise ModelManifestError("manifest input.additional_inputs.default is required")
+        default = item["default"]
+        if (
+            isinstance(default, bool)
+            or not isinstance(default, (int, float))
+            or not 0 <= float(default) <= 1
+        ):
+            raise ModelManifestError(
+                "manifest input.additional_inputs.default must be between 0 and 1"
+            )
 
 
 def _validate_preprocessing(value: Any) -> None:

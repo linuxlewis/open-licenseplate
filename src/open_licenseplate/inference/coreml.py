@@ -62,9 +62,9 @@ class CoreMLBackend:
             raise BackendContractError("Core ML model instance is closed")
         if not isinstance(model_input, PreparedInput):
             raise BackendContractError("Core ML prediction requires PreparedInput")
-        value = _coreml_input_value(model_input)
+        values = _coreml_prediction_inputs(model_input, model.descriptor.manifest)
         try:
-            outputs = model.handle.predict({model_input.input_name: value})
+            outputs = model.handle.predict(values)
         except Exception as error:
             raise BackendContractError("Core ML prediction failed") from error
         if not isinstance(outputs, Mapping):
@@ -121,6 +121,35 @@ def compare_manifest_to_inspection(
         raise BackendContractError("manifest input height does not match the Core ML model")
     if actual_input.color_space != input_values.get("color_space"):
         raise BackendContractError("manifest input color_space does not match the Core ML model")
+
+    additional_inputs = input_values.get("additional_inputs")
+    if additional_inputs is not None:
+        if not isinstance(additional_inputs, list):
+            raise BackendContractError("manifest input.additional_inputs is invalid")
+        for additional_input in additional_inputs:
+            if not isinstance(additional_input, dict):
+                raise BackendContractError("manifest input.additional_inputs is invalid")
+            input_name = additional_input.get("name")
+            role = additional_input.get("role")
+            expected_kind = additional_input.get("kind")
+            if not isinstance(input_name, str) or not isinstance(role, str):
+                raise BackendContractError("manifest additional input declaration is invalid")
+            actual_additional_input = actual_inputs.get(input_name)
+            if actual_additional_input is None:
+                raise BackendContractError(
+                    f"manifest additional input name {input_name!r} was not found "
+                    "in the Core ML model"
+                )
+            if actual_additional_input.kind != expected_kind:
+                raise BackendContractError(
+                    f"manifest additional input {role!r} name {input_name!r} "
+                    f"must be a Core ML {expected_kind} input"
+                )
+            if expected_kind == "double" and actual_additional_input.shape:
+                raise BackendContractError(
+                    f"manifest additional input {role!r} name {input_name!r} "
+                    "must be a scalar Core ML input"
+                )
 
     actual_outputs = {feature.name: feature for feature in inspection.outputs}
     declared_outputs = {
@@ -247,6 +276,44 @@ def _image_color_space(value: Any) -> str:
         return names[int(value)]
     except (KeyError, TypeError, ValueError) as error:
         raise BackendContractError("Core ML image input has an unsupported color space") from error
+
+
+def _coreml_prediction_inputs(
+    prepared: PreparedInput,
+    manifest: ModelManifest,
+) -> dict[str, Any]:
+    """Build the Core ML input dictionary from stable manifest roles."""
+    input_values = manifest.raw.get("input")
+    if not isinstance(input_values, dict):
+        raise BackendContractError("manifest input section is invalid")
+
+    values: dict[str, Any] = {
+        prepared.input_name: _coreml_input_value(prepared),
+    }
+    additional_inputs = input_values.get("additional_inputs")
+    if additional_inputs is None:
+        return values
+    if not isinstance(additional_inputs, list):
+        raise BackendContractError("manifest input.additional_inputs is invalid")
+
+    threshold_values = {
+        "confidence_threshold": float(prepared.transform.confidence_threshold),
+        "iou_threshold": float(prepared.transform.iou_threshold),
+    }
+    for additional_input in additional_inputs:
+        if not isinstance(additional_input, dict):
+            raise BackendContractError("manifest input.additional_inputs is invalid")
+        input_name = additional_input.get("name")
+        role = additional_input.get("role")
+        if not isinstance(input_name, str) or not isinstance(role, str):
+            raise BackendContractError("manifest additional input declaration is invalid")
+        try:
+            values[input_name] = threshold_values[role]
+        except KeyError as error:
+            raise BackendContractError(
+                f"manifest additional input role {role!r} is not supported"
+            ) from error
+    return values
 
 
 def _coreml_input_value(prepared: PreparedInput) -> Any:
