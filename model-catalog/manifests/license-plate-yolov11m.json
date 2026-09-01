@@ -1,0 +1,169 @@
+{
+  "adapter": "ultralytics_yolo_nms",
+  "artifact": "license-plate-yolov11m.mlpackage",
+  "artifact_sha256": "a49d1f50d10d66b2fdb2b84cae202e70d4a60afa74760187bb9e9d73cc64260b",
+  "backend": "coreml",
+  "compatibility": {
+    "minimum_macos": "14.0"
+  },
+  "conversion": {
+    "arguments": {
+      "conf": 0.25,
+      "device": "cpu",
+      "format": "coreml",
+      "half": false,
+      "imgsz": 640,
+      "int8": false,
+      "iou": 0.7,
+      "nms": true
+    },
+    "source_weight": "license-plate-finetune-v1m.pt",
+    "tool_versions": {
+      "coremltools": "8.3.0",
+      "numpy": "1.26.4",
+      "python": "3.12.14",
+      "torch": "2.5.0",
+      "torchvision": "0.20.0",
+      "ultralytics": "8.3.200"
+    }
+  },
+  "defaults": {
+    "confidence_threshold": 0.25,
+    "iou_threshold": 0.7
+  },
+  "display_name": "YOLOv11 Medium License Plate Detector",
+  "distribution": {
+    "archive": "open-licenseplate-model-catalog-license-plate-yolov11m.zip",
+    "archive_sha256": "3e09b5e3535289b9bcfcb3087aa685900546ae9ecf14c717d607cfc381b2fecc",
+    "archive_size": 40334020,
+    "recommendation": "higher_capacity",
+    "release_tag": "model-catalog-v1"
+  },
+  "id": "license-plate-yolov11m",
+  "input": {
+    "additional_inputs": [
+      {
+        "default": 0.7,
+        "kind": "double",
+        "name": "iouThreshold",
+        "optional": true
+      },
+      {
+        "default": 0.25,
+        "kind": "double",
+        "name": "confidenceThreshold",
+        "optional": true
+      }
+    ],
+    "color_space": "rgb",
+    "height": 640,
+    "kind": "image",
+    "name": "image",
+    "width": 640
+  },
+  "inspection": {
+    "inputs": [
+      {
+        "color_space": "rgb",
+        "height": 640,
+        "kind": "image",
+        "name": "image",
+        "width": 640
+      },
+      {
+        "kind": "double",
+        "name": "iouThreshold"
+      },
+      {
+        "kind": "double",
+        "name": "confidenceThreshold"
+      }
+    ],
+    "outputs": [
+      {
+        "data_type": "float32",
+        "kind": "multi_array",
+        "name": "confidence",
+        "shape_range": [
+          {
+            "lower_bound": 0,
+            "upper_bound": -1
+          },
+          {
+            "lower_bound": 1,
+            "upper_bound": 1
+          }
+        ]
+      },
+      {
+        "data_type": "float32",
+        "kind": "multi_array",
+        "name": "coordinates",
+        "shape_range": [
+          {
+            "lower_bound": 0,
+            "upper_bound": -1
+          },
+          {
+            "lower_bound": 4,
+            "upper_bound": 4
+          }
+        ]
+      }
+    ]
+  },
+  "labels": [
+    "license_plate"
+  ],
+  "outputs": {
+    "box_format": "xywh",
+    "boxes": "coordinates",
+    "coordinate_space": "normalized",
+    "geometry": {
+      "confidence": {
+        "data_type": "float32",
+        "kind": "multi_array",
+        "name": "confidence",
+        "shape_range": [
+          {
+            "lower_bound": 0,
+            "upper_bound": -1
+          },
+          {
+            "lower_bound": 1,
+            "upper_bound": 1
+          }
+        ]
+      },
+      "coordinates": {
+        "data_type": "float32",
+        "kind": "multi_array",
+        "name": "coordinates",
+        "shape_range": [
+          {
+            "lower_bound": 0,
+            "upper_bound": -1
+          },
+          {
+            "lower_bound": 4,
+            "upper_bound": 4
+          }
+        ]
+      }
+    },
+    "scores": "confidence"
+  },
+  "preprocessing": {
+    "resize": "letterbox"
+  },
+  "schema_version": 1,
+  "source": {
+    "file": "license-plate-finetune-v1m.pt",
+    "license": "AGPL-3.0",
+    "repository": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection",
+    "revision": "251a30d7daedca065f56e04b0af04052c907c68f",
+    "sha256": "d691f8d5e7709d2065b18a0e2bd75deaf08f6115cc0295cc3de7d0fd2eabcdae",
+    "url": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection/resolve/251a30d7daedca065f56e04b0af04052c907c68f/license-plate-finetune-v1m.pt"
+  },
+  "task": "object_detection"
+}
