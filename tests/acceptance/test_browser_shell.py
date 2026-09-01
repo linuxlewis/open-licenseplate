@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -237,11 +238,163 @@ def test_browser_can_visit_every_page_and_use_primary_navigation(
         page.wait_for_url(f"{browser_base_url}{path}")
         assert page.get_by_role("heading", name=title, exact=True).is_visible()
         assert page.locator('a[aria-current="page"] > span').first.inner_text() == label
+        if label == "Models":
+            page.locator("[data-catalog-card]").first.wait_for()
 
     page.set_viewport_size({"width": 420, "height": 800})
     page.goto(f"{browser_base_url}/system", wait_until="domcontentloaded")
     assert page.locator(".primary-nav").is_visible()
     assert page.locator(".system-grid").is_visible()
+
+
+@pytest.mark.browser
+def test_browser_models_page_loads_catalog_before_custom_upload(
+    browser_base_url: str,
+    chromium,
+) -> None:
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    page.goto(f"{browser_base_url}/models", wait_until="domcontentloaded")
+
+    cards = page.locator("[data-catalog-card]")
+    cards.first.wait_for()
+    assert cards.count() == 3
+    assert [cards.nth(index).locator(".catalog-item-name").inner_text() for index in range(3)] == [
+        "Nano",
+        "Small",
+        "Medium",
+    ]
+    assert [
+        cards.nth(index).locator(".catalog-recommendation").text_content() for index in range(3)
+    ] == ["Recommended", "Balanced", "Higher capacity"]
+    assert [
+        cards.nth(index).locator(".catalog-installed").text_content() for index in range(3)
+    ] == [
+        "Not installed",
+        "Not installed",
+        "Not installed",
+    ]
+    assert [
+        cards.nth(index)
+        .locator(".catalog-details")
+        .get_by_text(
+            size,
+            exact=True,
+        )
+        .count()
+        for index, size in enumerate(["5.1 MB", "18.2 MB", "38.5 MB"])
+    ] == [1, 1, 1]
+    assert page.get_by_text("AGPL-3.0", exact=True).count() == 3
+    assert page.get_by_role("button", name="Install", exact=True).count() == 3
+    assert page.locator("details.custom-model").is_visible()
+    assert page.get_by_text("Custom model", exact=True).is_visible()
+    assert page.locator("#model-manifest").is_visible()
+    assert page.locator("#model-archive").is_visible()
+    custom_summary = page.locator("details.custom-model > summary")
+    custom_summary.focus()
+    custom_summary.press("Enter")
+    assert page.locator("details.custom-model").get_attribute("open") is None
+    custom_summary.press("Enter")
+    assert page.locator("details.custom-model").get_attribute("open") == ""
+
+
+@pytest.mark.browser
+def test_browser_catalog_install_refreshes_state_and_prevents_duplicate_clicks(
+    browser_base_url: str,
+    chromium,
+) -> None:
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    catalog_url = f"{browser_base_url}/api/v1/models/catalog"
+    initial_payload = page.request.get(catalog_url).json()
+    target = initial_payload["models"][0]
+    install_state = {"installed": False}
+    post_urls: list[str] = []
+
+    def catalog_route(route: Any, request: Any) -> None:
+        if request.method == "POST":
+            post_urls.append(request.url)
+            install_state["installed"] = True
+            time.sleep(0.25)
+            route.fulfill(
+                status=201,
+                headers={"content-type": "application/json"},
+                body=json.dumps({"id": target["catalog_id"]}),
+            )
+            return
+        payload = deepcopy(initial_payload)
+        if install_state["installed"]:
+            payload["models"][0]["installed"] = True
+            payload["models"][0]["install_available"] = False
+        route.fulfill(
+            status=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(payload),
+        )
+
+    page.route(f"{catalog_url}**", catalog_route)
+    page.goto(f"{browser_base_url}/models", wait_until="domcontentloaded")
+    card = page.locator("[data-catalog-card]").first
+    button = card.get_by_role("button", name="Install", exact=True)
+    button_state = button.evaluate(
+        """element => {
+          element.click();
+          element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          return { disabled: element.disabled, text: element.textContent };
+        }"""
+    )
+    assert button_state == {"disabled": True, "text": "Installing..."}
+
+    page.wait_for_function(
+        """() => document.querySelector(
+          "[data-catalog-card] .catalog-item-status"
+        )?.hidden === true""",
+        timeout=5000,
+    )
+    installed_card = page.locator("[data-catalog-card]").first
+    installed_card.locator(".catalog-installed-true").wait_for(timeout=5000)
+    assert installed_card.locator(".catalog-installed").text_content() == "Installed"
+    assert installed_card.get_by_role("button", name="Install", exact=True).count() == 0
+    assert len(post_urls) == 1
+
+
+@pytest.mark.browser
+def test_browser_catalog_install_failure_keeps_install_action(
+    browser_base_url: str,
+    chromium,
+) -> None:
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    catalog_url = f"{browser_base_url}/api/v1/models/catalog"
+    initial_payload = page.request.get(catalog_url).json()
+
+    def catalog_route(route: Any, request: Any) -> None:
+        if request.method == "POST":
+            route.fulfill(
+                status=502,
+                headers={"content-type": "application/json"},
+                body=json.dumps({"detail": "catalog asset download failed"}),
+            )
+            return
+        route.fulfill(
+            status=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(initial_payload),
+        )
+
+    page.route(f"{catalog_url}**", catalog_route)
+    page.goto(f"{browser_base_url}/models", wait_until="domcontentloaded")
+    card = page.locator("[data-catalog-card]").first
+    button = card.get_by_role("button", name="Install", exact=True)
+    button.evaluate("element => element.click()")
+    status = card.locator(".catalog-item-status")
+    page.wait_for_function(
+        """element => element.textContent ===
+          "Install failed: catalog asset download failed. Try again." """,
+        arg=status.element_handle(),
+        timeout=5000,
+    )
+    assert status.text_content() == "Install failed: catalog asset download failed. Try again."
+    assert button.is_enabled()
+    assert button.text_content() == "Install"
 
 
 @pytest.mark.browser
