@@ -30,6 +30,12 @@ from .live.api import router as live_api_router
 from .logging import configure_logging
 from .models.api import _read_import_request
 from .models.api import router as model_api_router
+from .models.catalog import (
+    CatalogDownloader,
+    FixedCatalogDownloader,
+    ModelCatalog,
+    load_model_catalog,
+)
 from .models.repository import ModelRepository
 from .models.service import (
     RUNTIME_VALID,
@@ -103,6 +109,8 @@ def create_app(
     tracker_factory: TrackerFactory | None = None,
     tracking_config: TrackingConfig | None = None,
     event_sink: ClosedEventSink | None = None,
+    model_catalog: ModelCatalog | None = None,
+    catalog_downloader: CatalogDownloader | None = None,
 ) -> FastAPI:
     """Create the application without starting a server."""
     effective_settings = settings or load_settings()
@@ -111,6 +119,8 @@ def create_app(
     effective_source_factory = source_factory or _default_source_factory
     camera_runtime = CameraRuntime(effective_source_factory)
     backend_factory = inference_backend_factory or CoreMLBackend
+    effective_model_catalog = model_catalog or load_model_catalog()
+    effective_catalog_downloader = catalog_downloader or FixedCatalogDownloader()
 
     def effective_event_sink(event: Any) -> None:
         if event_sink is not None:
@@ -164,6 +174,8 @@ def create_app(
     application.state.inference_backend_factory = backend_factory
     application.state.live_pipeline = live_pipeline
     application.state.artifact_service = artifact_service
+    application.state.model_catalog = effective_model_catalog
+    application.state.catalog_downloader = effective_catalog_downloader
     application.state.detector_registry = DetectorRegistry(backend_factory)
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)

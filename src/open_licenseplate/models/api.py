@@ -7,6 +7,7 @@ import base64
 import binascii
 import math
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -33,6 +34,15 @@ from ..inference.contract import ComputeUnit
 from ..paths import ManagedPaths
 from ..redaction import redact_text
 from .archive import MAX_ARCHIVE_BYTES, compute_artifact_sha256
+from .catalog import (
+    CatalogDownloader,
+    CatalogDownloadError,
+    CatalogEntry,
+    CatalogError,
+    ModelCatalog,
+    catalog_entry_payload,
+    install_catalog_model,
+)
 from .manifest import ModelManifest
 from .repository import Model, ModelRepository, manifest_from_record, model_payload
 from .service import (
@@ -64,6 +74,88 @@ async def list_models(request: Request) -> JSONResponse:
             for model in repository.list()
         ]
         return _json({"models": models})
+    finally:
+        database.dispose()
+
+
+@router.get("/catalog")
+async def list_model_catalog(request: Request) -> JSONResponse:
+    database, error = _open_database(request)
+    if error is not None:
+        return error
+    assert database is not None
+    try:
+        catalog: ModelCatalog = request.app.state.model_catalog
+        repository = ModelRepository(database)
+        entries = []
+        for entry in catalog.entries:
+            installed_model = repository.get(entry.manifest.model_id)
+            installed = installed_model is not None and _catalog_model_matches(
+                installed_model,
+                entry,
+            )
+            entries.append(
+                catalog_entry_payload(
+                    catalog,
+                    entry,
+                    installed=installed,
+                    install_available=installed_model is None,
+                )
+            )
+        return _json({"catalog_id": catalog.catalog_id, "models": entries})
+    finally:
+        database.dispose()
+
+
+@router.post("/catalog/{catalog_id}/install", status_code=201)
+async def install_model_catalog_entry(
+    catalog_id: str,
+    request: Request,
+) -> JSONResponse:
+    catalog: ModelCatalog = request.app.state.model_catalog
+    entry = catalog.get(catalog_id)
+    if entry is None:
+        return _error("catalog entry was not found", status_code=404)
+
+    database, error = _open_database(request)
+    if error is not None:
+        return error
+    assert database is not None
+    try:
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                _install_model_catalog_sync,
+                catalog,
+                entry,
+                request.app.state.paths,
+                ModelRepository(database),
+                request.app.state.catalog_downloader,
+            )
+        )
+        try:
+            model, installed = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            with suppress(BaseException):
+                await asyncio.shield(worker)
+            raise
+        payload = model_payload(
+            model,
+            artifact_exists=_artifact_exists(request.app.state.paths, model),
+        )
+        payload["catalog"] = {
+            "catalog_id": catalog.catalog_id,
+            "entry_id": entry.catalog_id,
+        }
+        return _json(payload, status_code=201 if installed else 200)
+    except ModelConflictError as exception:
+        return _error(str(exception), status_code=409)
+    except CatalogDownloadError as exception:
+        return _error(str(exception), status_code=502)
+    except CatalogError as exception:
+        status_code = 422
+        return _error(str(exception), status_code=status_code)
+    except (ModelImportError, ValueError) as exception:
+        return _error(str(exception), status_code=422)
     finally:
         database.dispose()
 
@@ -599,6 +691,32 @@ def _artifact_exists(paths: ManagedPaths, model: Any) -> bool:
     except ValueError:
         return False
     return path.is_dir() and not path.is_symlink()
+
+
+def _install_model_catalog_sync(
+    catalog: ModelCatalog,
+    entry: CatalogEntry,
+    paths: ManagedPaths,
+    repository: ModelRepository,
+    downloader: CatalogDownloader,
+) -> tuple[Model, bool]:
+    """Run catalog network, file, and import work outside the event loop."""
+    return install_catalog_model(
+        catalog=catalog,
+        entry=entry,
+        paths=paths,
+        repository=repository,
+        downloader=downloader,
+    )
+
+
+def _catalog_model_matches(model: Model, entry: CatalogEntry) -> bool:
+    if model.id != entry.manifest.model_id or model.artifact_sha256 != entry.package_sha256:
+        return False
+    try:
+        return manifest_from_record(model).snapshot_json == entry.manifest.snapshot_json
+    except (ValueError, TypeError):
+        return False
 
 
 def _open_database(request: Request) -> tuple[Database | None, JSONResponse | None]:
