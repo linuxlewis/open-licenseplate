@@ -32,9 +32,11 @@ from .models.api import _read_import_request
 from .models.api import router as model_api_router
 from .models.catalog import (
     CatalogDownloader,
+    CatalogInstallLocks,
     FixedCatalogDownloader,
     ModelCatalog,
     load_model_catalog,
+    reconcile_orphaned_model_directories,
 )
 from .models.repository import ModelRepository
 from .models.service import (
@@ -143,6 +145,7 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         paths.ensure_directories()
         await asyncio.to_thread(artifact_service.reconcile)
+        await asyncio.to_thread(reconcile_orphaned_model_directories, paths)
         configure_logging(level=effective_settings.log_level, log_file=paths.app_log)
         application.state.startup_complete = True
         logger.info(
@@ -176,6 +179,7 @@ def create_app(
     application.state.artifact_service = artifact_service
     application.state.model_catalog = effective_model_catalog
     application.state.catalog_downloader = effective_catalog_downloader
+    application.state.catalog_install_locks = CatalogInstallLocks()
     application.state.detector_registry = DetectorRegistry(backend_factory)
     application.mount("/static", StaticFiles(directory=str(STATIC_DIRECTORY)), name="static")
     application.include_router(camera_api_router)

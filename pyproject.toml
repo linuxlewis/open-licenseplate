@@ -44,6 +44,18 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/open_licenseplate"]
 
+[tool.hatch.build.targets.sdist.force-include]
+"model-catalog/model-catalog-lock.json" = "model-catalog/model-catalog-lock.json"
+"model-catalog/manifests/license-plate-yolov11n.json" = "model-catalog/manifests/license-plate-yolov11n.json"
+"model-catalog/manifests/license-plate-yolov11s.json" = "model-catalog/manifests/license-plate-yolov11s.json"
+"model-catalog/manifests/license-plate-yolov11m.json" = "model-catalog/manifests/license-plate-yolov11m.json"
+
+[tool.hatch.build.targets.wheel.force-include]
+"model-catalog/model-catalog-lock.json" = "open_licenseplate/catalog_data/model-catalog-lock.json"
+"model-catalog/manifests/license-plate-yolov11n.json" = "open_licenseplate/catalog_data/manifests/license-plate-yolov11n.json"
+"model-catalog/manifests/license-plate-yolov11s.json" = "open_licenseplate/catalog_data/manifests/license-plate-yolov11s.json"
+"model-catalog/manifests/license-plate-yolov11m.json" = "open_licenseplate/catalog_data/manifests/license-plate-yolov11m.json"
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
+import threading
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -23,11 +27,14 @@ from open_licenseplate.models.catalog import (
     CatalogError,
     FixedCatalogDownloader,
     ModelCatalog,
+    install_catalog_model,
     load_model_catalog,
+    reconcile_orphaned_model_directories,
 )
 from open_licenseplate.models.manifest import parse_manifest
 from open_licenseplate.models.repository import ModelRepository
 from open_licenseplate.models.service import ModelImportError
+from open_licenseplate.paths import ManagedPaths
 
 
 @dataclass
@@ -36,6 +43,7 @@ class FakeDownloader:
 
     content: bytes = b""
     error: BaseException | None = None
+    delay_seconds: float = 0
     calls: list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
@@ -48,8 +56,10 @@ class FakeDownloader:
         url: str,
         archive_asset: str,
         expected_size: int,
-        destination: Path,
+        destination: Any,
+        cancel_event: Any = None,
     ) -> None:
+        del cancel_event
         assert self.calls is not None
         self.calls.append(
             {
@@ -58,9 +68,12 @@ class FakeDownloader:
                 "expected_size": expected_size,
             }
         )
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         if self.error is not None:
             raise self.error
-        destination.write_bytes(self.content)
+        destination.write(self.content)
+        destination.flush()
 
 
 class FakeResponse:
@@ -72,12 +85,14 @@ class FakeResponse:
         chunks: list[bytes] | None = None,
         read_error: BaseException | None = None,
         location: str | None = None,
+        read_delay: float = 0,
     ) -> None:
         self.status = status
         self._headers = headers or {}
         self._chunks = list(chunks or [])
         self._read_error = read_error
         self._location = location
+        self._read_delay = read_delay
 
     def getheader(self, name: str) -> str | None:
         if name.casefold() == "location" and self._location is not None:
@@ -85,6 +100,8 @@ class FakeResponse:
         return self._headers.get(name)
 
     def read(self, _size: int) -> bytes:
+        if self._read_delay:
+            time.sleep(self._read_delay)
         if self._read_error is not None:
             raise self._read_error
         if not self._chunks:
@@ -324,6 +341,217 @@ def test_catalog_install_is_verified_idempotent_and_not_active(tmp_path: Path) -
     _assert_staging_empty(settings)
 
 
+def test_concurrent_catalog_install_downloads_once_and_returns_installed_model(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    downloader = FakeDownloader(archive_bytes, delay_seconds=0.05)
+    with (
+        TestClient(
+            create_app(
+                settings,
+                model_catalog=catalog,
+                catalog_downloader=downloader,
+            )
+        ) as client,
+        ThreadPoolExecutor(max_workers=2) as executor,
+    ):
+        responses = list(
+            executor.map(
+                lambda _value: client.post("/api/v1/models/catalog/license-plate-yolov11n/install"),
+                (1, 2),
+            )
+        )
+
+    assert sorted(response.status_code for response in responses) == [200, 201]
+    assert len(downloader.calls or []) == 1
+    _assert_staging_empty(settings)
+
+
+def test_catalog_list_and_install_reject_a_damaged_installed_artifact(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    downloader = FakeDownloader(archive_bytes)
+
+    with TestClient(
+        create_app(
+            settings,
+            model_catalog=catalog,
+            catalog_downloader=downloader,
+        )
+    ) as client:
+        installed = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
+        assert installed.status_code == 201
+
+        package = (
+            settings.storage.data_dir
+            / "models"
+            / "license-plate-yolov11n"
+            / "license-plate-yolov11n.mlpackage"
+        )
+        for path in package.rglob("*"):
+            if path.is_dir():
+                path.chmod(0o700)
+            else:
+                path.chmod(0o600)
+        (package / "Data" / "weights.bin").write_bytes(b"damaged package")
+
+        listed = client.get("/api/v1/models/catalog")
+        repair = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
+
+    entry = listed.json()["models"][0]
+    assert entry["installed"] is False
+    assert entry["install_available"] is False
+    assert repair.status_code == 409
+    assert "missing or damaged" in repair.json()["detail"]
+    assert len(downloader.calls or []) == 1
+
+
+def test_catalog_cleanup_failure_after_commit_keeps_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    downloader = FakeDownloader(archive_bytes)
+
+    def fail_cleanup(_path: Path) -> None:
+        raise OSError("simulated cleanup failure")
+
+    errors: list[str] = []
+    monkeypatch.setattr(catalog_module, "_remove_staging_file", fail_cleanup)
+    monkeypatch.setattr(
+        catalog_module.logger,
+        "error",
+        lambda message, **_kwargs: errors.append(str(message)),
+    )
+    with TestClient(
+        create_app(
+            settings,
+            model_catalog=catalog,
+            catalog_downloader=downloader,
+        )
+    ) as client:
+        response = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
+
+    assert response.status_code == 201
+    assert errors == ["catalog staging cleanup failed"]
+    database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    try:
+        assert len(ModelRepository(database).list()) == 1
+    finally:
+        database.dispose()
+
+
+def test_catalog_startup_removes_orphaned_model_directory(tmp_path: Path) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    paths.ensure_directories()
+    orphan = paths.models / "orphaned-catalog-model"
+    (orphan / "partial.mlpackage").mkdir(parents=True)
+    (orphan / "partial.mlpackage" / "file").write_bytes(b"partial")
+
+    with TestClient(create_app(settings)):
+        pass
+
+    assert not orphan.exists()
+    assert reconcile_orphaned_model_directories(paths) == 0
+
+
+def test_catalog_repairs_staging_permissions_before_download(tmp_path: Path) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    paths.ensure_directories()
+    paths.staging.chmod(0o755)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    downloader = FakeDownloader(archive_bytes)
+
+    with TestClient(
+        create_app(
+            settings,
+            model_catalog=catalog,
+            catalog_downloader=downloader,
+        )
+    ) as client:
+        response = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
+
+    assert response.status_code == 201
+    assert stat.S_IMODE(paths.staging.stat().st_mode) == 0o700
+
+
+def test_catalog_rejects_a_symlinked_staging_root(tmp_path: Path) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    paths.ensure_directories()
+    outside = tmp_path / "outside-staging"
+    outside.mkdir()
+    paths.staging.rmdir()
+    paths.staging.symlink_to(outside, target_is_directory=True)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    downloader = FakeDownloader(archive_bytes)
+    database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    try:
+        with pytest.raises(CatalogError, match="staging directory"):
+            install_catalog_model(
+                catalog=catalog,
+                entry=catalog.entries[0],
+                paths=paths,
+                repository=ModelRepository(database),
+                downloader=downloader,
+            )
+    finally:
+        database.dispose()
+    assert downloader.calls == []
+
+
+def test_catalog_download_does_not_reopen_replaceable_staging_path(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    outside = tmp_path / "outside.zip"
+
+    class SymlinkSwapDownloader:
+        def download(
+            self,
+            *,
+            url: str,
+            archive_asset: str,
+            expected_size: int,
+            destination: Any,
+            cancel_event: Any = None,
+        ) -> None:
+            del url, archive_asset, expected_size, cancel_event
+            staging_path = next(paths.staging.iterdir())
+            outside.write_bytes(b"outside")
+            staging_path.unlink()
+            staging_path.symlink_to(outside)
+            destination.write(archive_bytes)
+            destination.flush()
+
+    with TestClient(
+        create_app(
+            settings,
+            model_catalog=catalog,
+            catalog_downloader=SymlinkSwapDownloader(),
+        )
+    ) as client:
+        response = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
+
+    assert response.status_code == 422
+    assert outside.read_bytes() == b"outside"
+    database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    try:
+        assert ModelRepository(database).list() == []
+    finally:
+        database.dispose()
+    _assert_staging_empty(settings)
+
+
 def test_catalog_install_rejects_unknown_id_without_downloading(tmp_path: Path) -> None:
     settings = _prepare_database(tmp_path)
     catalog, _archive_bytes = _test_catalog(tmp_path)
@@ -360,7 +588,7 @@ def test_catalog_archive_checksum_mismatch_cleans_up(tmp_path: Path) -> None:
     ) as client:
         response = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
 
-    assert response.status_code == 422
+    assert response.status_code == 502
     assert "SHA-256" in response.json()["detail"]
     _assert_staging_empty(settings)
     database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
@@ -404,6 +632,11 @@ def test_catalog_package_checksum_mismatch_cleans_up(tmp_path: Path) -> None:
     assert "artifact_sha256" in response.json()["detail"]
     assert archive_bytes != wrong_archive
     _assert_staging_empty(settings)
+    database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    try:
+        assert ModelRepository(database).list() == []
+    finally:
+        database.dispose()
 
 
 def test_catalog_manifest_mismatch_cleans_up(tmp_path: Path) -> None:
@@ -435,6 +668,11 @@ def test_catalog_manifest_mismatch_cleans_up(tmp_path: Path) -> None:
     assert response.status_code == 422
     assert "one top-level .mlpackage" in response.json()["detail"]
     _assert_staging_empty(settings)
+    database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    try:
+        assert ModelRepository(database).list() == []
+    finally:
+        database.dispose()
 
 
 def test_catalog_import_failure_cleans_up(
@@ -511,12 +749,18 @@ def test_fixed_downloader_rejects_wrong_hosts_and_unsafe_redirects(tmp_path: Pat
             )
         )
     )
-    with pytest.raises(CatalogError, match="redirect host"):
+    with (
+        (tmp_path / "asset.zip").open("w+b") as handle,
+        pytest.raises(
+            CatalogError,
+            match="redirect host",
+        ),
+    ):
         downloader.download(
             url=fixed_url,
             archive_asset=archive_asset,
             expected_size=1,
-            destination=tmp_path / "asset.zip",
+            destination=handle,
         )
 
 
@@ -544,12 +788,18 @@ def test_fixed_downloader_rejects_too_many_redirects(tmp_path: Path) -> None:
         max_redirects=2,
         connection_factory=connection_factory,
     )
-    with pytest.raises(CatalogError, match="too many redirects"):
+    with (
+        (tmp_path / "asset.zip").open("w+b") as handle,
+        pytest.raises(
+            CatalogError,
+            match="too many redirects",
+        ),
+    ):
         downloader.download(
             url=fixed_url,
             archive_asset=archive_asset,
             expected_size=1,
-            destination=tmp_path / "asset.zip",
+            destination=handle,
         )
 
 
@@ -594,10 +844,77 @@ def test_fixed_downloader_enforces_stream_limits_and_timeouts(
         connection_factory=lambda _host, _port, _timeout: FakeConnection(response)
     )
 
-    with pytest.raises(CatalogError, match=expected_message):
+    destination = tmp_path / "asset.zip"
+    with (
+        destination.open("w+b") as handle,
+        pytest.raises(
+            CatalogError,
+            match=expected_message,
+        ),
+    ):
         downloader.download(
             url=fixed_url,
             archive_asset=archive_asset,
             expected_size=4,
-            destination=tmp_path / "asset.zip",
+            destination=handle,
+        )
+
+
+def test_fixed_downloader_enforces_a_total_deadline(tmp_path: Path) -> None:
+    archive_asset = "asset.zip"
+    fixed_url = (
+        "https://github.com/linuxlewis/open-licenseplate/releases/download/"
+        f"model-catalog-v1/{archive_asset}"
+    )
+    response = FakeResponse(
+        chunks=[b"abcd"],
+        read_delay=0.02,
+    )
+    downloader = FixedCatalogDownloader(
+        total_timeout=0.001,
+        connection_factory=lambda _host, _port, _timeout: FakeConnection(response),
+    )
+
+    with (
+        (tmp_path / "asset.zip").open("w+b") as handle,
+        pytest.raises(
+            CatalogError,
+            match="exceeded its deadline",
+        ),
+    ):
+        downloader.download(
+            url=fixed_url,
+            archive_asset=archive_asset,
+            expected_size=4,
+            destination=handle,
+        )
+
+
+def test_fixed_downloader_honors_cancellation(tmp_path: Path) -> None:
+    archive_asset = "asset.zip"
+    fixed_url = (
+        "https://github.com/linuxlewis/open-licenseplate/releases/download/"
+        f"model-catalog-v1/{archive_asset}"
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+    downloader = FixedCatalogDownloader(
+        connection_factory=lambda _host, _port, _timeout: FakeConnection(
+            FakeResponse(chunks=[b"abcd"])
+        )
+    )
+
+    with (
+        (tmp_path / "asset.zip").open("w+b") as handle,
+        pytest.raises(
+            CatalogError,
+            match="cancelled",
+        ),
+    ):
+        downloader.download(
+            url=fixed_url,
+            archive_asset=archive_asset,
+            expected_size=4,
+            destination=handle,
+            cancel_event=cancel_event,
         )

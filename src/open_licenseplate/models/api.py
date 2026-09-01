@@ -7,6 +7,7 @@ import base64
 import binascii
 import math
 import tempfile
+import threading
 from contextlib import suppress
 from pathlib import Path
 from time import perf_counter
@@ -39,8 +40,11 @@ from .catalog import (
     CatalogDownloadError,
     CatalogEntry,
     CatalogError,
+    CatalogInstallLocks,
+    CatalogIntegrityError,
     ModelCatalog,
     catalog_entry_payload,
+    catalog_model_is_installed,
     install_catalog_model,
 )
 from .manifest import ModelManifest
@@ -93,6 +97,7 @@ async def list_model_catalog(request: Request) -> JSONResponse:
             installed = installed_model is not None and _catalog_model_matches(
                 installed_model,
                 entry,
+                request.app.state.paths,
             )
             entries.append(
                 catalog_entry_payload(
@@ -117,26 +122,31 @@ async def install_model_catalog_entry(
     if entry is None:
         return _error("catalog entry was not found", status_code=404)
 
-    database, error = _open_database(request)
-    if error is not None:
-        return error
-    assert database is not None
-    try:
-        worker = asyncio.create_task(
-            asyncio.to_thread(
-                _install_model_catalog_sync,
-                catalog,
-                entry,
-                request.app.state.paths,
-                ModelRepository(database),
-                request.app.state.catalog_downloader,
-            )
+    paths = request.app.state.paths
+    if database_status(paths.database)["status"] != "ok":
+        return _error(
+            "database is not ready; run `open-licenseplate db upgrade` first",
+            status_code=409,
         )
+    cancel_event = threading.Event()
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _install_model_catalog_sync,
+            catalog,
+            entry,
+            paths,
+            paths.database,
+            request.app.state.catalog_downloader,
+            request.app.state.catalog_install_locks,
+            cancel_event,
+        )
+    )
+    try:
         try:
             model, installed = await asyncio.shield(worker)
         except asyncio.CancelledError:
-            with suppress(BaseException):
-                await asyncio.shield(worker)
+            cancel_event.set()
+            worker.add_done_callback(_consume_catalog_worker)
             raise
         payload = model_payload(
             model,
@@ -151,13 +161,12 @@ async def install_model_catalog_entry(
         return _error(str(exception), status_code=409)
     except CatalogDownloadError as exception:
         return _error(str(exception), status_code=502)
+    except CatalogIntegrityError as exception:
+        return _error(str(exception), status_code=502)
     except CatalogError as exception:
-        status_code = 422
-        return _error(str(exception), status_code=status_code)
+        return _error(str(exception), status_code=422)
     except (ModelImportError, ValueError) as exception:
         return _error(str(exception), status_code=422)
-    finally:
-        database.dispose()
 
 
 @router.post("/import", status_code=201)
@@ -697,26 +706,39 @@ def _install_model_catalog_sync(
     catalog: ModelCatalog,
     entry: CatalogEntry,
     paths: ManagedPaths,
-    repository: ModelRepository,
+    database_path: Path,
     downloader: CatalogDownloader,
+    install_locks: CatalogInstallLocks,
+    cancel_event: threading.Event,
 ) -> tuple[Model, bool]:
     """Run catalog network, file, and import work outside the event loop."""
-    return install_catalog_model(
-        catalog=catalog,
-        entry=entry,
-        paths=paths,
-        repository=repository,
-        downloader=downloader,
-    )
-
-
-def _catalog_model_matches(model: Model, entry: CatalogEntry) -> bool:
-    if model.id != entry.manifest.model_id or model.artifact_sha256 != entry.package_sha256:
-        return False
+    database = Database(database_path)
     try:
-        return manifest_from_record(model).snapshot_json == entry.manifest.snapshot_json
-    except (ValueError, TypeError):
-        return False
+        return install_catalog_model(
+            catalog=catalog,
+            entry=entry,
+            paths=paths,
+            repository=ModelRepository(database),
+            downloader=downloader,
+            install_locks=install_locks,
+            cancel_event=cancel_event,
+        )
+    finally:
+        database.dispose()
+
+
+def _catalog_model_matches(
+    model: Model,
+    entry: CatalogEntry,
+    paths: ManagedPaths,
+) -> bool:
+    return catalog_model_is_installed(model, entry, paths)
+
+
+def _consume_catalog_worker(worker: asyncio.Task[Any]) -> None:
+    """Consume a detached worker result after request cancellation."""
+    with suppress(BaseException):
+        worker.result()
 
 
 def _open_database(request: Request) -> tuple[Database | None, JSONResponse | None]:

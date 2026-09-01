@@ -5,16 +5,29 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import logging
+import os
 import re
-from collections.abc import Callable, Mapping
-from contextlib import suppress
+import stat
+import tempfile
+import threading
+import time
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, BinaryIO, Protocol, cast
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
+from ..database import Database, database_status
 from ..paths import ManagedPaths
-from .archive import MAX_ARCHIVE_BYTES
+from .archive import (
+    MAX_ARCHIVE_BYTES,
+    ModelArchiveError,
+    compute_artifact_sha256,
+    validate_package_directory,
+)
 from .manifest import ModelManifest, ModelManifestError, parse_manifest
 from .repository import Model, ModelRepository, manifest_from_record
 from .service import ModelConflictError, ModelImportError, import_model
@@ -33,6 +46,7 @@ CATALOG_LOCK_PATH = CATALOG_ROOT / "model-catalog-lock.json"
 CATALOG_MAX_REDIRECTS = 3
 CATALOG_CONNECT_TIMEOUT = 10.0
 CATALOG_READ_TIMEOUT = 30.0
+CATALOG_TOTAL_TIMEOUT = 120.0
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -49,6 +63,9 @@ _REQUEST_HEADERS = {
     "Accept": "application/octet-stream",
     "User-Agent": "open-licenseplate-model-catalog",
 }
+_CATALOG_RESOURCE_DIRECTORY = "catalog_data"
+_CATALOG_LOCK_FILENAME = "model-catalog-lock.json"
+logger = logging.getLogger("open_licenseplate.models.catalog")
 
 
 class CatalogError(ValueError):
@@ -109,9 +126,29 @@ class CatalogDownloader(Protocol):
         url: str,
         archive_asset: str,
         expected_size: int,
-        destination: Path,
+        destination: BinaryIO,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Stream one fixed catalog asset into a private destination."""
+
+
+class CatalogInstallLocks:
+    """Serialize installs for one catalog model inside one application process."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    @contextmanager
+    def acquire(self, catalog_id: str) -> Iterator[None]:
+        """Hold the lock for one catalog entry until its install finishes."""
+        with self._guard:
+            lock = self._locks.setdefault(catalog_id, threading.Lock())
+        with lock:
+            yield
+
+
+_DEFAULT_INSTALL_LOCKS = CatalogInstallLocks()
 
 
 class FixedCatalogDownloader:
@@ -122,11 +159,13 @@ class FixedCatalogDownloader:
         *,
         connect_timeout: float = CATALOG_CONNECT_TIMEOUT,
         read_timeout: float = CATALOG_READ_TIMEOUT,
+        total_timeout: float = CATALOG_TOTAL_TIMEOUT,
         max_redirects: int = CATALOG_MAX_REDIRECTS,
         connection_factory: Callable[[str, int, float], Any] | None = None,
     ) -> None:
         self.connect_timeout = connect_timeout
         self.read_timeout = read_timeout
+        self.total_timeout = total_timeout
         self.max_redirects = max_redirects
         self._connection_factory = connection_factory or _https_connection
 
@@ -136,20 +175,27 @@ class FixedCatalogDownloader:
         url: str,
         archive_asset: str,
         expected_size: int,
-        destination: Path,
+        destination: BinaryIO,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         """Download one exact-size asset and reject unsafe redirect chains."""
         current_url = validate_catalog_url(url, archive_asset)
+        deadline = time.monotonic() + self.total_timeout
         for redirect_count in range(self.max_redirects + 1):
             connection: Any | None = None
             response: Any | None = None
             try:
+                _check_download_state(deadline, cancel_event)
                 parsed = _parse_url(current_url)
                 host = parsed.hostname
                 if host is None:
                     raise CatalogDownloadError("catalog asset URL has no host")
                 port = parsed.port or 443
-                connection = self._connection_factory(host, port, self.connect_timeout)
+                connection = self._connection_factory(
+                    host,
+                    port,
+                    min(self.connect_timeout, _remaining(deadline)),
+                )
                 connection.request("GET", _request_target(parsed), headers=_REQUEST_HEADERS)
                 response = connection.getresponse()
                 status = int(response.status)
@@ -166,11 +212,14 @@ class FixedCatalogDownloader:
                     continue
                 if status < 200 or status >= 300:
                     raise CatalogDownloadError("catalog asset returned an unexpected status")
-                _set_read_timeout(response, self.read_timeout)
+                _set_read_timeout(response, min(self.read_timeout, _remaining(deadline)))
                 _stream_response(
                     response,
                     destination=destination,
                     expected_size=expected_size,
+                    deadline=deadline,
+                    read_timeout=self.read_timeout,
+                    cancel_event=cancel_event,
                 )
                 return
             except CatalogError:
@@ -188,12 +237,43 @@ class FixedCatalogDownloader:
         raise CatalogDownloadError("catalog asset returned too many redirects")
 
 
-def load_model_catalog(root: Path = CATALOG_ROOT) -> ModelCatalog:
+def load_model_catalog(root: Path | None = None) -> ModelCatalog:
     """Load and validate the committed lock and its matching manifests."""
+    if root is None:
+        resource_root = resources.files("open_licenseplate").joinpath(_CATALOG_RESOURCE_DIRECTORY)
+        if resource_root.is_dir():
+            return _load_resource_catalog(resource_root)
+        root = CATALOG_ROOT
+    return _load_filesystem_catalog(root)
+
+
+def _load_filesystem_catalog(root: Path) -> ModelCatalog:
     try:
-        lock_path = _contained_file(root, CATALOG_LOCK_PATH.relative_to(CATALOG_ROOT))
+        lock_path = _contained_file(root, Path(_CATALOG_LOCK_FILENAME))
         lock = _read_json_object(lock_path)
-        return _parse_catalog_lock(lock, root)
+        return _parse_catalog_lock(
+            lock,
+            lambda reference: _contained_file(root, Path(reference)).read_bytes(),
+        )
+    except CatalogError:
+        raise
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+        raise CatalogError("model catalog metadata is invalid") from error
+
+
+def _load_resource_catalog(resource_root: Any) -> ModelCatalog:
+    try:
+        lock_resource = resource_root.joinpath(_CATALOG_LOCK_FILENAME)
+        lock = _read_json_object_bytes(cast(bytes, lock_resource.read_bytes()))
+
+        def read_manifest(reference: str) -> bytes:
+            parts = _manifest_reference_parts(reference)
+            manifest_resource = resource_root.joinpath(*parts)
+            if not manifest_resource.is_file():
+                raise CatalogError("model catalog metadata is invalid")
+            return cast(bytes, manifest_resource.read_bytes())
+
+        return _parse_catalog_lock(lock, read_manifest)
     except CatalogError:
         raise
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
@@ -234,34 +314,67 @@ def install_catalog_model(
     paths: ManagedPaths,
     repository: ModelRepository,
     downloader: CatalogDownloader,
+    install_locks: CatalogInstallLocks | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Model, bool]:
     """Download, verify, and import one fixed entry.
 
     The existing model importer remains the authority for package extraction,
     manifest checks, package hashing, and the database commit.
     """
-    del catalog
-    _validate_entry_for_install(entry)
+    effective_locks = install_locks or _DEFAULT_INSTALL_LOCKS
+    effective_cancel_event = cancel_event or threading.Event()
+    with effective_locks.acquire(entry.catalog_id):
+        return _install_catalog_model_locked(
+            catalog=catalog,
+            entry=entry,
+            paths=paths,
+            repository=repository,
+            downloader=downloader,
+            cancel_event=effective_cancel_event,
+        )
+
+
+def _install_catalog_model_locked(
+    *,
+    catalog: ModelCatalog,
+    entry: CatalogEntry,
+    paths: ManagedPaths,
+    repository: ModelRepository,
+    downloader: CatalogDownloader,
+    cancel_event: threading.Event,
+) -> tuple[Model, bool]:
+    """Run one serialized catalog install with atomic staging cleanup."""
+    _check_cancelled(cancel_event)
+    _validate_catalog_entry(catalog, entry)
     existing = repository.get(entry.manifest.model_id)
     if existing is not None:
         if _is_identical_installed_model(existing, entry):
-            return existing, False
+            if catalog_model_is_installed(existing, entry, paths):
+                return existing, False
+            raise ModelConflictError(
+                "the catalog model record exists but its artifact is missing or damaged"
+            )
         raise ModelConflictError(
             "a managed model with this catalog id already exists with different provenance"
         )
 
     try:
         paths.ensure_directories()
-        staging_path = _new_staging_path(paths.staging, entry.archive_asset)
+        _ensure_private_staging(paths.staging)
+        staging_path, staging_file = _new_staging_file(paths.staging)
     except OSError as error:
         raise CatalogError("catalog staging could not be prepared") from error
+
+    committed = False
     try:
         try:
             downloader.download(
                 url=entry.archive_url,
                 archive_asset=entry.archive_asset,
                 expected_size=entry.archive_size,
-                destination=staging_path,
+                destination=staging_file,
+                cancel_event=cancel_event,
             )
         except CatalogError:
             raise
@@ -271,11 +384,19 @@ def install_catalog_model(
             raise CatalogDownloadError("catalog asset download failed") from error
         except Exception as error:
             raise CatalogDownloadError("catalog asset download failed") from error
+
+        try:
+            staging_file.flush()
+            os.fsync(staging_file.fileno())
+        except (OSError, ValueError) as error:
+            raise CatalogDownloadError("catalog staging write failed") from error
+        _check_cancelled(cancel_event)
         _verify_downloaded_archive(
-            staging_path,
+            staging_file,
             expected_size=entry.archive_size,
             expected_sha256=entry.archive_sha256,
         )
+        staging_file.close()
         try:
             model = import_model(
                 manifest_value=entry.manifest_bytes,
@@ -291,12 +412,76 @@ def install_catalog_model(
             ) from error
         except Exception as error:
             raise ModelImportError("catalog model import failed safely") from error
+        committed = True
         return model, True
     finally:
+        if not staging_file.closed:
+            with suppress(OSError, ValueError):
+                staging_file.close()
         try:
-            staging_path.unlink(missing_ok=True)
-        except OSError as error:
-            raise CatalogError("catalog staging cleanup failed") from error
+            _remove_staging_file(staging_path)
+        except OSError:
+            logger.error(
+                "catalog staging cleanup failed",
+                extra={"archive_asset": entry.archive_asset},
+            )
+            if not committed:
+                raise CatalogError("catalog staging cleanup failed") from None
+
+
+def catalog_model_is_installed(
+    model: Model,
+    entry: CatalogEntry,
+    paths: ManagedPaths,
+) -> bool:
+    """Verify model metadata and the managed package before reporting installed."""
+    if not _is_identical_installed_model(model, entry):
+        return False
+    try:
+        artifact_path = ManagedPaths.validate_contained_path(
+            paths.models / model.artifact_path,
+            paths.models,
+        )
+        model_directory = ManagedPaths.validate_contained_path(
+            paths.models / model.id,
+            paths.models,
+        )
+        if (
+            not artifact_path.is_dir()
+            or artifact_path.is_symlink()
+            or artifact_path.name != entry.manifest.artifact
+            or artifact_path.parent != model_directory
+        ):
+            return False
+        validate_package_directory(
+            artifact_path,
+            expected_artifact=entry.manifest.artifact,
+        )
+        return compute_artifact_sha256(artifact_path) == entry.package_sha256
+    except (ModelArchiveError, ModelManifestError, OSError, ValueError, TypeError):
+        return False
+
+
+def reconcile_orphaned_model_directories(paths: ManagedPaths) -> int:
+    """Remove model directories left by an interrupted import with no DB row."""
+    if paths.models.is_symlink() or not paths.models.is_dir():
+        raise CatalogError("managed model directory is not safe")
+    if database_status(paths.database)["status"] != "ok":
+        return 0
+    database = Database(paths.database)
+    try:
+        known_ids = {model.id for model in ModelRepository(database).list()}
+    finally:
+        database.dispose()
+
+    removed = 0
+    for child in tuple(paths.models.iterdir()):
+        if child.name in known_ids:
+            continue
+        ManagedPaths.validate_contained_path(child, paths.models)
+        _remove_orphan_model_entry(child)
+        removed += 1
+    return removed
 
 
 def validate_catalog_url(url: str, archive_asset: str) -> str:
@@ -346,7 +531,10 @@ def validate_catalog_redirect(url: str, archive_asset: str) -> str:
     return url
 
 
-def _parse_catalog_lock(lock: dict[str, Any], root: Path) -> ModelCatalog:
+def _parse_catalog_lock(
+    lock: dict[str, Any],
+    read_manifest: Callable[[str], bytes],
+) -> ModelCatalog:
     if set(lock) != {"catalog_id", "models", "release", "schema_version"}:
         raise CatalogError("model catalog metadata is invalid")
     if lock["schema_version"] != CATALOG_SCHEMA_VERSION:
@@ -372,7 +560,7 @@ def _parse_catalog_lock(lock: dict[str, Any], root: Path) -> ModelCatalog:
     for raw_model in raw_models:
         if not isinstance(raw_model, dict):
             raise CatalogError("model catalog metadata is invalid")
-        entry = _parse_catalog_entry(raw_model, root)
+        entry = _parse_catalog_entry(raw_model, read_manifest)
         if entry.catalog_id in seen_ids:
             raise CatalogError("model catalog contains duplicate IDs")
         seen_ids.add(entry.catalog_id)
@@ -387,7 +575,10 @@ def _parse_catalog_lock(lock: dict[str, Any], root: Path) -> ModelCatalog:
     )
 
 
-def _parse_catalog_entry(raw: dict[str, Any], root: Path) -> CatalogEntry:
+def _parse_catalog_entry(
+    raw: dict[str, Any],
+    read_manifest: Callable[[str], bytes],
+) -> CatalogEntry:
     expected_keys = {
         "id",
         "manifest",
@@ -431,11 +622,10 @@ def _parse_catalog_entry(raw: dict[str, Any], root: Path) -> CatalogEntry:
     manifest_reference = _required_text(raw, "manifest", 255)
     manifest_asset = _required_text(raw, "manifest_asset", 255)
     manifest_sha256 = _required_sha256(raw, "manifest_sha256")
-    manifest_path = _contained_file(root, Path(manifest_reference))
-    if manifest_path.name != manifest_asset:
+    if _manifest_reference_parts(manifest_reference)[-1] != manifest_asset:
         raise CatalogError("model catalog manifest reference is invalid")
     try:
-        manifest_bytes = manifest_path.read_bytes()
+        manifest_bytes = read_manifest(manifest_reference)
         if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha256:
             raise CatalogError("model catalog manifest checksum does not match the lock")
         manifest = parse_manifest(manifest_bytes)
@@ -487,8 +677,15 @@ def _is_identical_installed_model(model: Model, entry: CatalogEntry) -> bool:
     return manifest.snapshot_json == entry.manifest.snapshot_json
 
 
-def _validate_entry_for_install(entry: CatalogEntry) -> None:
+def _validate_catalog_entry(catalog: ModelCatalog, entry: CatalogEntry) -> None:
     """Keep injected test catalogs subject to the same fixed-entry contract."""
+    if (
+        catalog.catalog_id != CATALOG_ID
+        or catalog.repository != CATALOG_REPOSITORY
+        or catalog.release_tag != CATALOG_RELEASE_TAG
+        or catalog.get(entry.catalog_id) != entry
+    ):
+        raise CatalogError("model catalog metadata is invalid")
     try:
         parsed_manifest = parse_manifest(entry.manifest_bytes)
     except (ModelManifestError, ValueError, TypeError) as error:
@@ -511,22 +708,26 @@ def _validate_entry_for_install(entry: CatalogEntry) -> None:
 
 
 def _verify_downloaded_archive(
-    path: Path,
+    handle: BinaryIO,
     *,
     expected_size: int,
     expected_sha256: str,
 ) -> None:
     try:
-        actual_size = path.stat().st_size
+        file_stat = os.fstat(handle.fileno())
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise CatalogIntegrityError("catalog archive is not a regular file")
+        actual_size = file_stat.st_size
         if actual_size != expected_size:
             raise CatalogIntegrityError("catalog archive size does not match the lock")
         digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK_BYTES), b""):
-                digest.update(chunk)
+        handle.seek(0)
+        for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK_BYTES), b""):
+            digest.update(chunk)
+        handle.seek(0)
     except CatalogError:
         raise
-    except OSError as error:
+    except (OSError, ValueError) as error:
         raise CatalogIntegrityError("catalog archive could not be verified") from error
     if digest.hexdigest() != expected_sha256:
         raise CatalogIntegrityError("catalog archive SHA-256 does not match the lock")
@@ -535,8 +736,11 @@ def _verify_downloaded_archive(
 def _stream_response(
     response: Any,
     *,
-    destination: Path,
+    destination: BinaryIO,
     expected_size: int,
+    deadline: float,
+    read_timeout: float,
+    cancel_event: threading.Event | None,
 ) -> None:
     content_length = response.getheader("Content-Length")
     if content_length is not None:
@@ -547,20 +751,22 @@ def _stream_response(
 
     received = 0
     try:
-        with destination.open("wb") as output:
-            while True:
-                chunk = response.read(DOWNLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                if not isinstance(chunk, bytes):
-                    raise CatalogDownloadError("catalog asset returned an invalid body")
-                received += len(chunk)
-                if received > expected_size:
-                    raise CatalogIntegrityError("catalog archive exceeds the locked size limit")
-                output.write(chunk)
+        while True:
+            _check_download_state(deadline, cancel_event)
+            _set_read_timeout(response, min(read_timeout, _remaining(deadline)))
+            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
+            _check_download_state(deadline, cancel_event)
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                raise CatalogDownloadError("catalog asset returned an invalid body")
+            received += len(chunk)
+            if received > expected_size:
+                raise CatalogIntegrityError("catalog archive exceeds the locked size limit")
+            destination.write(chunk)
     except CatalogError:
         raise
-    except (OSError, TimeoutError) as error:
+    except (OSError, TimeoutError, ValueError) as error:
         if isinstance(error, TimeoutError):
             raise CatalogDownloadError("catalog asset download timed out") from error
         raise CatalogDownloadError("catalog asset download failed") from error
@@ -568,24 +774,53 @@ def _stream_response(
         raise CatalogIntegrityError("catalog archive size does not match the lock")
 
 
-def _new_staging_path(staging_directory: Path, archive_asset: str) -> Path:
-    del archive_asset
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
+def _new_staging_file(staging_directory: Path) -> tuple[Path, BinaryIO]:
+    file_descriptor, path_value = tempfile.mkstemp(
         prefix="catalog-",
         suffix=".download",
         dir=staging_directory,
-        delete=False,
-    ) as handle:
-        path = Path(handle.name)
-        try:
-            path.chmod(0o600)
-        except OSError:
+    )
+    path = Path(path_value)
+    try:
+        os.chmod(path, 0o600, follow_symlinks=False)
+        return path, os.fdopen(file_descriptor, "w+b")
+    except OSError:
+        with suppress(OSError):
+            os.close(file_descriptor)
+        with suppress(OSError):
             path.unlink(missing_ok=True)
-            raise
-        return path
+        raise
+
+
+def _ensure_private_staging(staging_directory: Path) -> None:
+    """Repair safe directory mode and reject a replaceable staging root."""
+    if staging_directory.is_symlink() or not staging_directory.is_dir():
+        raise CatalogError("catalog staging directory is not safe")
+    try:
+        mode = stat.S_IMODE(staging_directory.stat().st_mode)
+        if mode & 0o077:
+            staging_directory.chmod(0o700)
+            mode = stat.S_IMODE(staging_directory.stat().st_mode)
+    except OSError as error:
+        raise CatalogError("catalog staging directory is not safe") from error
+    if mode & 0o077:
+        raise CatalogError("catalog staging directory is not private")
+
+
+def _remove_staging_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _remove_orphan_model_entry(path: Path) -> None:
+    """Remove one validated orphan without targeting the managed root."""
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if not path.is_dir():
+        raise CatalogError("orphaned model storage is not safe")
+    for child in tuple(path.iterdir()):
+        _remove_orphan_model_entry(child)
+    path.rmdir()
 
 
 def _parse_url(value: str) -> Any:
@@ -640,10 +875,27 @@ def _contained_file(root: Path, relative: Path) -> Path:
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    return _read_json_object_bytes(path.read_bytes())
+
+
+def _read_json_object_bytes(data: bytes) -> dict[str, Any]:
+    value = json.loads(data.decode("utf-8"))
     if not isinstance(value, dict):
         raise CatalogError("model catalog metadata is invalid")
     return value
+
+
+def _manifest_reference_parts(value: str) -> tuple[str, ...]:
+    if not value or "\\" in value:
+        raise CatalogError("model catalog manifest reference is invalid")
+    parts = tuple(value.split("/"))
+    if (
+        len(parts) != 2
+        or parts[0] != "manifests"
+        or any(not part or part in {".", ".."} for part in parts)
+    ):
+        raise CatalogError("model catalog manifest reference is invalid")
+    return parts
 
 
 def _required_mapping(values: Mapping[str, Any], key: str) -> dict[str, Any]:
@@ -676,6 +928,27 @@ def _request_target(parsed: Any) -> str:
     if parsed.query:
         target += f"?{parsed.query}"
     return target
+
+
+def _remaining(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise CatalogDownloadError("catalog asset download exceeded its deadline")
+    return remaining
+
+
+def _check_download_state(
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise CatalogDownloadError("catalog asset download was cancelled")
+    _remaining(deadline)
+
+
+def _check_cancelled(cancel_event: threading.Event) -> None:
+    if cancel_event.is_set():
+        raise CatalogDownloadError("catalog asset download was cancelled")
 
 
 def _set_read_timeout(response: Any, timeout: float) -> None:
