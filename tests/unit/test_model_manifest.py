@@ -292,6 +292,30 @@ def test_manifest_rejects_additional_input_name_collisions() -> None:
         )
 
 
+def test_manifest_rejects_an_unrepresentably_large_additional_input_default() -> None:
+    additional_input = {
+        "name": "confidence",
+        "kind": "double",
+        "role": "confidence_threshold",
+        "optional": True,
+        "default": 10**1000,
+    }
+
+    with pytest.raises(ModelManifestError, match="additional_inputs.default"):
+        parse_manifest(
+            _manifest(
+                input={
+                    "name": "image",
+                    "kind": "image",
+                    "width": 640,
+                    "height": 640,
+                    "color_space": "rgb",
+                    "additional_inputs": [additional_input],
+                }
+            )
+        )
+
+
 def test_manifest_accepts_declared_raw_output_contract() -> None:
     manifest = parse_manifest(
         _manifest(

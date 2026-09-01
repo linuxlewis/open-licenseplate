@@ -250,11 +250,17 @@ def _validate_additional_inputs(value: Any, input_name: str) -> None:
         if "default" not in item:
             raise ModelManifestError("manifest input.additional_inputs.default is required")
         default = item["default"]
-        if (
-            isinstance(default, bool)
-            or not isinstance(default, (int, float))
-            or not 0 <= float(default) <= 1
-        ):
+        if isinstance(default, bool) or not isinstance(default, (int, float)):
+            raise ModelManifestError(
+                "manifest input.additional_inputs.default must be between 0 and 1"
+            )
+        try:
+            normalized_default = float(default)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ModelManifestError(
+                "manifest input.additional_inputs.default must be between 0 and 1"
+            ) from error
+        if not 0 <= normalized_default <= 1:
             raise ModelManifestError(
                 "manifest input.additional_inputs.default must be between 0 and 1"
             )
