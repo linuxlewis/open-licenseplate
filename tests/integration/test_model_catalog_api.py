@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import stat
 import threading
 import time
@@ -25,6 +26,7 @@ from open_licenseplate.models.catalog import (
     CATALOG_ROOT,
     CatalogEntry,
     CatalogError,
+    CatalogInstallLocks,
     FixedCatalogDownloader,
     ModelCatalog,
     install_catalog_model,
@@ -74,6 +76,68 @@ class FakeDownloader:
             raise self.error
         destination.write(self.content)
         destination.flush()
+
+
+@dataclass
+class ProcessDownloader:
+    """Cross-process test downloader with a shared call marker."""
+
+    content: bytes
+    marker_path: Path
+    delay_seconds: float = 0.1
+
+    def download(
+        self,
+        *,
+        url: str,
+        archive_asset: str,
+        expected_size: int,
+        destination: Any,
+        cancel_event: Any = None,
+    ) -> None:
+        del url, archive_asset, expected_size, cancel_event
+        with self.marker_path.open("ab") as marker:
+            marker.write(b"download\n")
+        time.sleep(self.delay_seconds)
+        destination.write(self.content)
+        destination.flush()
+
+
+def _run_process_catalog_install(
+    catalog: ModelCatalog,
+    data_directory: Path,
+    log_directory: Path,
+    archive_bytes: bytes,
+    marker_path: Path,
+    result_queue: Any,
+) -> None:
+    try:
+        paths = ManagedPaths.from_roots(data_directory, log_directory)
+        database = Database(paths.database)
+        try:
+            model, created = install_catalog_model(
+                catalog=catalog,
+                entry=catalog.entries[0],
+                paths=paths,
+                repository=ModelRepository(database),
+                downloader=ProcessDownloader(archive_bytes, marker_path),
+                install_locks=CatalogInstallLocks(),
+            )
+        finally:
+            database.dispose()
+        result_queue.put(("ok", model.id, created))
+    except BaseException as error:
+        result_queue.put(("error", type(error).__name__, str(error)))
+
+
+def _hold_process_catalog_lock(
+    data_directory: Path,
+    ready_event: Any,
+) -> None:
+    locks = CatalogInstallLocks()
+    with locks.acquire("license-plate-yolov11n", data_directory):
+        ready_event.set()
+        time.sleep(30)
 
 
 class FakeResponse:
@@ -369,6 +433,65 @@ def test_concurrent_catalog_install_downloads_once_and_returns_installed_model(
     _assert_staging_empty(settings)
 
 
+def test_cross_process_catalog_install_downloads_once_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    settings = _prepare_database(tmp_path)
+    catalog, archive_bytes = _test_catalog(tmp_path)
+    marker_path = tmp_path / "downloads.log"
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_run_process_catalog_install,
+            args=(
+                catalog,
+                settings.storage.data_dir,
+                settings.storage.log_dir,
+                archive_bytes,
+                marker_path,
+                result_queue,
+            ),
+        )
+        for _ in range(2)
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(30)
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    results = [result_queue.get(timeout=1) for _ in processes]
+    assert sorted(results, key=lambda result: result[2]) == [
+        ("ok", "license-plate-yolov11n", False),
+        ("ok", "license-plate-yolov11n", True),
+    ]
+    assert marker_path.read_text(encoding="utf-8").splitlines() == ["download"]
+    _assert_staging_empty(settings)
+
+
+def test_catalog_lock_is_released_when_process_terminates(tmp_path: Path) -> None:
+    settings = _prepare_database(tmp_path)
+    paths = ManagedPaths.from_settings(settings)
+    paths.ensure_directories()
+    context = multiprocessing.get_context("spawn")
+    ready_event = context.Event()
+    process = context.Process(
+        target=_hold_process_catalog_lock,
+        args=(paths.data_dir, ready_event),
+    )
+    process.start()
+    assert ready_event.wait(5)
+    process.terminate()
+    process.join(5)
+    assert process.exitcode is not None
+
+    locks = CatalogInstallLocks()
+    with locks.acquire("license-plate-yolov11n", paths.data_dir):
+        pass
+
+
 def test_catalog_list_and_install_reject_a_damaged_installed_artifact(
     tmp_path: Path,
 ) -> None:
@@ -452,7 +575,12 @@ def test_catalog_startup_removes_orphaned_model_directory(tmp_path: Path) -> Non
     paths.ensure_directories()
     orphan = paths.models / "orphaned-catalog-model"
     (orphan / "partial.mlpackage").mkdir(parents=True)
-    (orphan / "partial.mlpackage" / "file").write_bytes(b"partial")
+    package = orphan / "partial.mlpackage"
+    file_path = package / "file"
+    file_path.write_bytes(b"partial")
+    file_path.chmod(0o400)
+    package.chmod(0o500)
+    orphan.chmod(0o500)
 
     with TestClient(create_app(settings)):
         pass
@@ -628,8 +756,8 @@ def test_catalog_package_checksum_mismatch_cleans_up(tmp_path: Path) -> None:
     ) as client:
         response = client.post("/api/v1/models/catalog/license-plate-yolov11n/install")
 
-    assert response.status_code == 422
-    assert "artifact_sha256" in response.json()["detail"]
+    assert response.status_code == 502
+    assert "package SHA-256" in response.json()["detail"]
     assert archive_bytes != wrong_archive
     _assert_staging_empty(settings)
     database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")

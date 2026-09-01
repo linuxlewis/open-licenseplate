@@ -40,6 +40,7 @@ from .catalog import (
     CatalogDownloadError,
     CatalogEntry,
     CatalogError,
+    CatalogInstallBusyError,
     CatalogInstallLocks,
     CatalogIntegrityError,
     ModelCatalog,
@@ -163,6 +164,8 @@ async def install_model_catalog_entry(
         return _error(str(exception), status_code=502)
     except CatalogIntegrityError as exception:
         return _error(str(exception), status_code=502)
+    except CatalogInstallBusyError as exception:
+        return _error(str(exception), status_code=409)
     except CatalogError as exception:
         return _error(str(exception), status_code=422)
     except (ModelImportError, ValueError) as exception:

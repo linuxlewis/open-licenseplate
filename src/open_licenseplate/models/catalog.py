@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import http.client
 import json
@@ -47,6 +48,8 @@ CATALOG_MAX_REDIRECTS = 3
 CATALOG_CONNECT_TIMEOUT = 10.0
 CATALOG_READ_TIMEOUT = 30.0
 CATALOG_TOTAL_TIMEOUT = 120.0
+CATALOG_INSTALL_LOCK_TIMEOUT = 120.0
+CATALOG_INSTALL_LOCK_POLL = 0.05
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -65,6 +68,7 @@ _REQUEST_HEADERS = {
 }
 _CATALOG_RESOURCE_DIRECTORY = "catalog_data"
 _CATALOG_LOCK_FILENAME = "model-catalog-lock.json"
+_CATALOG_INSTALL_LOCK_DIRECTORY = ".catalog-install-locks"
 logger = logging.getLogger("open_licenseplate.models.catalog")
 
 
@@ -78,6 +82,10 @@ class CatalogDownloadError(CatalogError):
 
 class CatalogIntegrityError(CatalogError):
     """Raised when a downloaded catalog asset does not match its lock entry."""
+
+
+class CatalogInstallBusyError(CatalogError):
+    """Raised when another process holds the same catalog install lock."""
 
 
 @dataclass(frozen=True)
@@ -133,19 +141,40 @@ class CatalogDownloader(Protocol):
 
 
 class CatalogInstallLocks:
-    """Serialize installs for one catalog model inside one application process."""
+    """Serialize installs for one catalog model across application processes."""
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
-        self._locks: dict[str, threading.Lock] = {}
+        self._locks: dict[tuple[Path, str], threading.Lock] = {}
 
     @contextmanager
-    def acquire(self, catalog_id: str) -> Iterator[None]:
+    def acquire(self, catalog_id: str, data_directory: Path) -> Iterator[None]:
         """Hold the lock for one catalog entry until its install finishes."""
+        lock_directory = data_directory / _CATALOG_INSTALL_LOCK_DIRECTORY
+        _ensure_private_lock_directory(lock_directory)
+        resolved_directory = lock_directory.resolve()
         with self._guard:
-            lock = self._locks.setdefault(catalog_id, threading.Lock())
+            lock = self._locks.setdefault(
+                (resolved_directory, catalog_id),
+                threading.Lock(),
+            )
         with lock:
-            yield
+            lock_path = lock_directory / f"{catalog_id}.lock"
+            lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            file_descriptor = os.open(
+                lock_path,
+                lock_flags,
+                0o600,
+            )
+            try:
+                os.chmod(lock_path, 0o600, follow_symlinks=False)
+                _acquire_process_lock(file_descriptor)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(file_descriptor)
 
 
 _DEFAULT_INSTALL_LOCKS = CatalogInstallLocks()
@@ -324,7 +353,8 @@ def install_catalog_model(
     """
     effective_locks = install_locks or _DEFAULT_INSTALL_LOCKS
     effective_cancel_event = cancel_event or threading.Event()
-    with effective_locks.acquire(entry.catalog_id):
+    paths.ensure_directories()
+    with effective_locks.acquire(entry.catalog_id, paths.data_dir):
         return _install_catalog_model_locked(
             catalog=catalog,
             entry=entry,
@@ -404,7 +434,13 @@ def _install_catalog_model_locked(
                 paths=paths,
                 repository=repository,
             )
-        except (CatalogError, ModelImportError):
+        except CatalogError:
+            raise
+        except ModelImportError as error:
+            if str(error) == "model artifact SHA-256 does not match manifest artifact_sha256":
+                raise CatalogIntegrityError(
+                    "catalog package SHA-256 does not match the lock"
+                ) from error
             raise
         except ValueError as error:
             raise ModelConflictError(
@@ -792,6 +828,36 @@ def _new_staging_file(staging_directory: Path) -> tuple[Path, BinaryIO]:
         raise
 
 
+def _ensure_private_lock_directory(lock_directory: Path) -> None:
+    if lock_directory.is_symlink():
+        raise CatalogError("catalog install lock directory is not safe")
+    lock_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if lock_directory.is_symlink() or not lock_directory.is_dir():
+        raise CatalogError("catalog install lock directory is not safe")
+    try:
+        mode = stat.S_IMODE(lock_directory.stat().st_mode)
+        if mode & 0o077:
+            lock_directory.chmod(0o700)
+            mode = stat.S_IMODE(lock_directory.stat().st_mode)
+    except OSError as error:
+        raise CatalogError("catalog install lock directory is not safe") from error
+    if mode & 0o077:
+        raise CatalogError("catalog install lock directory is not private")
+
+
+def _acquire_process_lock(file_descriptor: int) -> None:
+    deadline = time.monotonic() + CATALOG_INSTALL_LOCK_TIMEOUT
+    while True:
+        try:
+            fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CatalogInstallBusyError("catalog install is already in progress") from None
+            time.sleep(min(CATALOG_INSTALL_LOCK_POLL, remaining))
+
+
 def _ensure_private_staging(staging_directory: Path) -> None:
     """Repair safe directory mode and reject a replaceable staging root."""
     if staging_directory.is_symlink() or not staging_directory.is_dir():
@@ -818,6 +884,7 @@ def _remove_orphan_model_entry(path: Path) -> None:
         return
     if not path.is_dir():
         raise CatalogError("orphaned model storage is not safe")
+    path.chmod(0o700)
     for child in tuple(path.iterdir()):
         _remove_orphan_model_entry(child)
     path.rmdir()
