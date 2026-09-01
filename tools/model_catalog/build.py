@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import platform
 import shutil
 import sys
 import tempfile
@@ -19,6 +20,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 from urllib.request import urlopen
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
+
+from open_licenseplate.models.archive import (  # noqa: E402
+    ModelArchiveError,
+    validate_package_directory,
+)
 
 SOURCE_REPOSITORY = "morsetechlab/yolov11-license-plate-detection"
 SOURCE_REVISION = "251a30d7daedca065f56e04b0af04052c907c68f"
@@ -79,6 +88,7 @@ def main() -> int:
         raise SystemExit(
             f"Python {EXPECTED_PYTHON} is required for this build; found {sys.version.split()[0]}"
         )
+    build_platform = _check_build_platform()
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -95,10 +105,11 @@ def main() -> int:
         _download_source_weight(variant, source_path)
         package_path = _export_variant(variant, source_path, package_dir)
         inspection = _inspect_and_normalize_package(variant, package_path)
-        package_sha256 = compute_package_sha256(package_path)
+        validated_files = _validate_package(package_path)
+        package_sha256 = compute_package_sha256(validated_files)
         archive_name = f"open-licenseplate-model-catalog-{variant.model_id}.zip"
         archive_path = archive_dir / archive_name
-        create_reproducible_archive(package_path, archive_path)
+        create_reproducible_archive(package_path, archive_path, validated_files)
         archive_sha256 = sha256_file(archive_path)
         manifest = _make_manifest(
             variant=variant,
@@ -109,6 +120,7 @@ def main() -> int:
             archive_path=archive_path,
             archive_sha256=archive_sha256,
             inspection=inspection,
+            build_platform=build_platform,
         )
         manifest_path = manifest_dir / f"{variant.model_id}.json"
         write_json(manifest_path, manifest)
@@ -167,6 +179,23 @@ def _check_tool_versions() -> None:
     ]
     if mismatches:
         raise RuntimeError("conversion tool version mismatch: " + ", ".join(mismatches))
+
+
+def _check_build_platform() -> dict[str, str]:
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise RuntimeError(
+            "model catalog conversion requires macOS on arm64; "
+            f"found {platform.system()} {platform.machine()}"
+        )
+    macos_version = platform.mac_ver()[0]
+    if not macos_version:
+        raise RuntimeError("could not identify the macOS version")
+    return {
+        "operating_system": "macOS",
+        "macos_version": macos_version,
+        "architecture": "arm64",
+        "kernel_release": platform.release(),
+    }
 
 
 def _download_source_weight(variant: Variant, destination: Path) -> None:
@@ -286,6 +315,19 @@ def _inspect_and_normalize_package(variant: Variant, package_path: Path) -> dict
     return inspection
 
 
+def _validate_package(package_path: Path) -> tuple[tuple[Path, Path], ...]:
+    try:
+        validated_files = validate_package_directory(
+            package_path,
+            expected_artifact=package_path.name,
+        )
+    except (ModelArchiveError, OSError) as error:
+        raise RuntimeError(f"generated package failed application validation: {error}") from error
+    if not validated_files:
+        raise RuntimeError("generated package has no validated files")
+    return validated_files
+
+
 def _remove_volatile_metadata(spec: Any) -> None:
     user_defined = spec.description.metadata.userDefined
     user_defined.pop("date", None)
@@ -375,6 +417,7 @@ def _make_manifest(
     archive_path: Path,
     archive_sha256: str,
     inspection: dict[str, Any],
+    build_platform: dict[str, str],
 ) -> dict[str, Any]:
     source_weight = variant.source_weight
     return {
@@ -396,12 +439,14 @@ def _make_manifest(
                 {
                     "name": "iouThreshold",
                     "kind": "double",
+                    "role": "iou_threshold",
                     "optional": True,
                     "default": IOU_THRESHOLD,
                 },
                 {
                     "name": "confidenceThreshold",
                     "kind": "double",
+                    "role": "confidence_threshold",
                     "optional": True,
                     "default": CONFIDENCE_THRESHOLD,
                 },
@@ -446,6 +491,7 @@ def _make_manifest(
                 "torchvision": TORCHVISION_VERSION,
                 "numpy": NUMPY_VERSION,
             },
+            "build_platform": build_platform,
             "arguments": {
                 "format": "coreml",
                 "imgsz": IMAGE_SIZE,
@@ -481,6 +527,7 @@ def _make_lock(*, output_dir: Path, release_base_url: str) -> dict[str, Any]:
                 "manifest_asset": manifest_path.name,
                 "archive_asset": archive_name,
                 "archive_url": f"{release_base_url}/{archive_name}",
+                "manifest_sha256": sha256_file(manifest_path),
                 "package_sha256": manifest["artifact_sha256"],
                 "archive_sha256": manifest["distribution"]["archive_sha256"],
                 "archive_size": manifest["distribution"]["archive_size"],
@@ -519,15 +566,14 @@ def _write_checksums(output_dir: Path, lock: dict[str, Any]) -> None:
     (output_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def compute_package_sha256(package_path: Path) -> str:
+def compute_package_sha256(validated_files: tuple[tuple[Path, Path], ...]) -> str:
     digest = hashlib.sha256()
     files = sorted(
         (
-            path.relative_to(package_path).as_posix(),
+            relative_path.as_posix(),
             path,
         )
-        for path in package_path.rglob("*")
-        if path.is_file() and not path.is_symlink()
+        for path, relative_path in validated_files
     )
     for relative_name, path in files:
         encoded_name = relative_name.encode("utf-8")
@@ -539,11 +585,18 @@ def compute_package_sha256(package_path: Path) -> str:
     return digest.hexdigest()
 
 
-def create_reproducible_archive(package_path: Path, archive_path: Path) -> None:
+def create_reproducible_archive(
+    package_path: Path,
+    archive_path: Path,
+    validated_files: tuple[tuple[Path, Path], ...],
+) -> None:
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
-        paths = sorted(path for path in package_path.rglob("*") if path.is_file())
-        for path in paths:
-            relative_name = path.relative_to(package_path.parent).as_posix()
+        paths = sorted(
+            validated_files,
+            key=lambda item: item[1].as_posix(),
+        )
+        for path, relative_path in paths:
+            relative_name = f"{package_path.name}/{relative_path.as_posix()}"
             info = zipfile.ZipInfo(relative_name, date_time=(1980, 1, 1, 0, 0, 0))
             info.create_system = 3
             info.external_attr = 0o100600 << 16

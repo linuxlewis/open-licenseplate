@@ -10,6 +10,7 @@
       "license": "AGPL-3.0",
       "manifest": "manifests/license-plate-yolov11n.json",
       "manifest_asset": "license-plate-yolov11n.json",
+      "manifest_sha256": "c56d7c44292c057dd4458ea365b51a20d0d393f098d6633112e6f71c688e2037",
       "package_sha256": "0ef12cc52daa3caa8a99b3d64f8c7a6e6371f2fdc24a474e1b8faa85e4e1e9a1",
       "release_tag": "model-catalog-v1",
       "source": {
@@ -30,6 +31,7 @@
       "license": "AGPL-3.0",
       "manifest": "manifests/license-plate-yolov11s.json",
       "manifest_asset": "license-plate-yolov11s.json",
+      "manifest_sha256": "d7cb1028306a95f68100a89d1e3bd57aeca7342607253ec379c325222fc75a7e",
       "package_sha256": "bf2806ec780236c4c258a103f512013a4a0f796cb4185e7a4b6c142f84c5fee0",
       "release_tag": "model-catalog-v1",
       "source": {
@@ -50,6 +52,7 @@
       "license": "AGPL-3.0",
       "manifest": "manifests/license-plate-yolov11m.json",
       "manifest_asset": "license-plate-yolov11m.json",
+      "manifest_sha256": "8995663d428f43503b35de34c08151d405bd46adfc56f4f5708a8399653df077",
       "package_sha256": "a49d1f50d10d66b2fdb2b84cae202e70d4a60afa74760187bb9e9d73cc64260b",
       "release_tag": "model-catalog-v1",
       "source": {

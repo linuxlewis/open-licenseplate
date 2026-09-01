@@ -99,13 +99,17 @@ def copy_and_validate_package(
     return target
 
 
-def validate_package_directory(package_path: Path, *, expected_artifact: str) -> None:
-    """Validate a local .mlpackage directory without copying its contents."""
+def validate_package_directory(
+    package_path: Path,
+    *,
+    expected_artifact: str,
+) -> tuple[tuple[Path, Path], ...]:
+    """Validate a local .mlpackage directory and return its checked files."""
     if not package_path.is_dir() or package_path.is_symlink():
         raise ModelArchiveError("model package must be a real directory")
     if package_path.name != expected_artifact:
         raise ModelArchiveError("model package name does not match manifest artifact")
-    list(_validated_directory_files(package_path))
+    return tuple(_validated_directory_files(package_path))
 
 
 def compute_artifact_sha256(package_path: Path) -> str:

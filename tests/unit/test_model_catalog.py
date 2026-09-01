@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -52,6 +53,7 @@ def test_catalog_lock_has_a_bounded_schema_and_fixed_release_urls() -> None:
             "manifest_asset",
             "archive_asset",
             "archive_url",
+            "manifest_sha256",
             "package_sha256",
             "archive_sha256",
             "archive_size",
@@ -85,8 +87,10 @@ def test_catalog_lock_has_a_bounded_schema_and_fixed_release_urls() -> None:
         assert model["archive_size"] > 0
         assert isinstance(model["package_sha256"], str)
         assert isinstance(model["archive_sha256"], str)
+        assert isinstance(model["manifest_sha256"], str)
         assert SHA256_RE.fullmatch(model["package_sha256"])
         assert SHA256_RE.fullmatch(model["archive_sha256"])
+        assert SHA256_RE.fullmatch(model["manifest_sha256"])
 
         source = model["source"]
         assert isinstance(source, dict)
@@ -114,9 +118,11 @@ def test_catalog_manifests_match_the_lock_and_inspected_coreml_contract() -> Non
         manifest_path = CATALOG_ROOT / str(model["manifest"])
         manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest = parse_manifest(manifest_value)
+        manifest_bytes = manifest_path.read_bytes()
 
         assert manifest.model_id == model["id"]
         assert manifest.artifact == f"{model['id']}.mlpackage"
+        assert model["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
         assert manifest.artifact_sha256 == model["package_sha256"]
         assert manifest.source_license == "AGPL-3.0"
         assert manifest.raw["source"]["revision"] == SOURCE_REVISION
@@ -136,17 +142,33 @@ def test_catalog_manifests_match_the_lock_and_inspected_coreml_contract() -> Non
                 {
                     "name": "iouThreshold",
                     "kind": "double",
+                    "role": "iou_threshold",
                     "optional": True,
                     "default": 0.7,
                 },
                 {
                     "name": "confidenceThreshold",
                     "kind": "double",
+                    "role": "confidence_threshold",
                     "optional": True,
                     "default": 0.25,
                 },
             ],
         }
+        tool_versions = manifest.raw["conversion"]["tool_versions"]
+        assert tool_versions == {
+            "coremltools": "8.3.0",
+            "numpy": "1.26.4",
+            "python": "3.12.14",
+            "torch": "2.5.0",
+            "torchvision": "0.20.0",
+            "ultralytics": "8.3.200",
+        }
+        build_platform = manifest.raw["conversion"]["build_platform"]
+        assert build_platform["operating_system"] == "macOS"
+        assert build_platform["architecture"] == "arm64"
+        assert re.fullmatch(r"\d+\.\d+", build_platform["macos_version"])
+        assert build_platform["kernel_release"]
         outputs = manifest.raw["outputs"]
         assert outputs["boxes"] == "coordinates"
         assert outputs["scores"] == "confidence"
@@ -204,3 +226,44 @@ def test_catalog_notice_contains_license_attribution_and_custom_import_statement
     license_text = (CATALOG_ROOT / "licenses/AGPL-3.0.txt").read_text(encoding="utf-8")
     assert license_text.startswith("                    GNU AFFERO GENERAL PUBLIC LICENSE")
     assert "END OF TERMS AND CONDITIONS" in license_text
+
+
+def test_conversion_requirements_are_exact_and_hash_locked() -> None:
+    requirements = (
+        (CATALOG_ROOT.parent / "tools/model_catalog/requirements.in")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    lock = (
+        (CATALOG_ROOT.parent / "tools/model_catalog/requirements-macos-arm64.lock")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    direct = {
+        line.split("==", 1)[0].strip().lower(): line.split("==", 1)[1].strip()
+        for line in requirements
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    locked = {
+        line.split("==", 1)[0].strip().lower(): line.split("==", 1)[1].split("\\", 1)[0].strip()
+        for line in lock
+        if "==" in line and not line.lstrip().startswith("#")
+    }
+    assert direct == {name: locked[name] for name in direct}
+    package_blocks = "\n".join(lock).split("\n")
+    for name in direct:
+        start = next(
+            index
+            for index, line in enumerate(package_blocks)
+            if line.lower().startswith(f"{name}==")
+        )
+        end = next(
+            (
+                index
+                for index in range(start + 1, len(package_blocks))
+                if "==" in package_blocks[index] and not package_blocks[index].startswith(" ")
+            ),
+            len(package_blocks),
+        )
+        block = "\n".join(package_blocks[start:end])
+        assert "--hash=sha256:" in block

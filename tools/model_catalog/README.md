@@ -19,23 +19,38 @@ the application dependencies:
 ```bash
 BUILD_ROOT="$(mktemp -d /tmp/open-licenseplate-model-catalog.XXXXXX)"
 uv venv --python 3.12.14 "$BUILD_ROOT/.venv"
-uv pip install \
+uv pip sync \
   --python "$BUILD_ROOT/.venv/bin/python" \
-  "ultralytics==8.3.200" \
-  "coremltools==8.3.0" \
-  "torch==2.5.0" \
-  "torchvision==0.20.0" \
-  "numpy==1.26.4"
+  --python-version 3.12.14 \
+  --python-platform aarch64-apple-darwin \
+  --only-binary :all: \
+  --require-hashes \
+  tools/model_catalog/requirements-macos-arm64.lock
 "$BUILD_ROOT/.venv/bin/python" tools/model_catalog/build.py \
   --output-dir "$BUILD_ROOT/output"
+```
+
+The lock file is generated from `requirements.in` with:
+
+```bash
+uv pip compile \
+  --python-version 3.12.14 \
+  --python-platform aarch64-apple-darwin \
+  --only-binary :all: \
+  --generate-hashes \
+  --emit-index-url \
+  --output-file tools/model_catalog/requirements-macos-arm64.lock \
+  tools/model_catalog/requirements.in
 ```
 
 The script exports Core ML `mlpackage` files with NMS enabled, inspects the
 actual package input and output descriptions, removes volatile package
 metadata, writes stable package identifiers, creates uncompressed
 reproducible ZIP archives, and writes manifests, the catalog lock, and
-checksums. The package tree checksum uses the same path-and-byte algorithm as
-the application model importer.
+checksums. It runs the application's package directory validator first and
+uses that validated file set for both the package tree hash and archive.
+The package tree checksum uses the same path-and-byte algorithm as the
+application model importer.
 
 The generated output is suitable for release upload. The committed
 `model-catalog/` metadata must be updated from the generated `manifests/`,

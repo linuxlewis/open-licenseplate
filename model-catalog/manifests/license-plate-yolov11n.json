@@ -17,6 +17,12 @@
       "iou": 0.7,
       "nms": true
     },
+    "build_platform": {
+      "architecture": "arm64",
+      "kernel_release": "25.6.0",
+      "macos_version": "26.6",
+      "operating_system": "macOS"
+    },
     "source_weight": "license-plate-finetune-v1n.pt",
     "tool_versions": {
       "coremltools": "8.3.0",
@@ -46,13 +52,15 @@
         "default": 0.7,
         "kind": "double",
         "name": "iouThreshold",
-        "optional": true
+        "optional": true,
+        "role": "iou_threshold"
       },
       {
         "default": 0.25,
         "kind": "double",
         "name": "confidenceThreshold",
-        "optional": true
+        "optional": true,
+        "role": "confidence_threshold"
       }
     ],
     "color_space": "rgb",
