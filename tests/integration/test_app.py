@@ -104,7 +104,6 @@ def test_system_page_shows_versions_paths_database_and_setting_sources(tmp_path:
     assert "9017" in response.text
     assert "persisted" in response.text
     assert "Not configured" in response.text
-    assert "Core ML support is not part of M0." in response.text
 
 
 def test_system_density_preference_persists_and_applies_after_restart(tmp_path: Path) -> None:

@@ -115,8 +115,7 @@ a {
 
 .version-chip,
 .status-chip,
-.source-tag,
-.planned-label {
+.source-tag {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: rgba(255, 253, 248, 0.58);
@@ -181,16 +180,6 @@ a {
   font-family: var(--font-display);
   font-size: 22px;
   font-weight: 500;
-}
-
-.workflow-badge {
-  padding: 6px 9px;
-  border: 1px solid rgba(45, 124, 118, 0.25);
-  border-radius: 999px;
-  color: var(--teal);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
 }
 
 .still-image-form {
@@ -289,18 +278,6 @@ a {
   border-right: 1px solid var(--line);
 }
 
-.sidebar-intro {
-  padding: 0 12px 28px;
-}
-
-.sidebar-intro p,
-.sidebar-foot p {
-  margin: 9px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.55;
-}
-
 .eyebrow {
   color: var(--accent-dark);
   font-size: 10px;
@@ -349,12 +326,6 @@ a {
   font-size: 17px;
 }
 
-.sidebar-foot {
-  margin-top: auto;
-  padding: 18px 12px 0;
-  border-top: 1px solid var(--line);
-}
-
 .content {
   min-width: 0;
   padding: 34px 10px 20px 0;
@@ -392,13 +363,6 @@ h2 {
   margin-bottom: 0;
   font-size: 25px;
   line-height: 1.1;
-}
-
-.lede {
-  max-width: 650px;
-  margin-bottom: 0;
-  color: var(--muted);
-  font-size: 16px;
 }
 
 .page-index {
@@ -516,16 +480,12 @@ body.density-compact .status-item {
   font-size: clamp(30px, 4vw, 46px);
 }
 
-.empty-copy p {
-  max-width: 560px;
-  margin-bottom: 20px;
-  color: var(--muted);
-  font-size: 16px;
-}
-
-.planned-label {
-  display: inline-block;
-  padding: 8px 10px;
+.empty-list-heading {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 25px;
+  font-weight: 500;
+  letter-spacing: -0.035em;
 }
 
 .status-strip {
@@ -687,13 +647,12 @@ body.density-compact .status-item {
 
 .camera-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(260px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   margin-bottom: 18px;
 }
 
 .camera-form-card,
-.camera-safety-card,
 .camera-list-card {
   min-width: 0;
 }
@@ -816,13 +775,12 @@ body.density-compact .status-item {
 
 .model-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   margin-bottom: 18px;
 }
 
 .model-form-card,
-.model-safety-card,
 .model-list-card {
   min-width: 0;
 }
@@ -1073,16 +1031,6 @@ body.density-compact .status-item {
 .event-ocr-card,
 .event-crops-card {
   min-width: 0;
-}
-
-.no-ocr-state {
-  max-width: 720px;
-  margin: 0;
-  padding: 15px 17px;
-  border-left: 3px solid var(--gold);
-  color: #795729;
-  font-size: 14px;
-  background: #f7ead6;
 }
 
 .crop-grid {
@@ -1374,11 +1322,6 @@ code {
     border-right: 0;
   }
 
-  .sidebar-intro,
-  .sidebar-foot {
-    display: none;
-  }
-
   .primary-nav {
     display: flex;
     gap: 6px;
@@ -1437,10 +1380,6 @@ code {
     font-size: clamp(38px, 13vw, 58px);
   }
 
-  .lede {
-    font-size: 14px;
-  }
-
   .page-index {
     width: 46px;
     height: 46px;
@@ -1470,10 +1409,6 @@ code {
 
   .empty-copy {
     text-align: center;
-  }
-
-  .empty-copy p {
-    font-size: 14px;
   }
 
   .event-row {

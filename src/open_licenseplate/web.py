@@ -34,10 +34,7 @@ class PageDefinition:
     path: str
     eyebrow: str
     title: str
-    description: str
     empty_title: str = ""
-    empty_description: str = ""
-    planned_milestone: str = ""
     nav: bool = True
 
 
@@ -48,13 +45,7 @@ PAGES = (
         path="/live",
         eyebrow="Operations",
         title="Live view",
-        description=(
-            "Run synchronized live detection with exact-frame overlays while keeping the raw "
-            "camera preview available."
-        ),
-        empty_title="No live source is configured",
-        empty_description=("Add a camera and validate a model, then start live detection here."),
-        planned_milestone="M3-B",
+        empty_title="No live source",
     ),
     PageDefinition(
         key="events",
@@ -62,13 +53,7 @@ PAGES = (
         path="/events",
         eyebrow="Review",
         title="Plate events",
-        description="Review confirmed plate appearances, evidence, and processing results.",
-        empty_title="No plate events yet",
-        empty_description=(
-            "Events will appear after the live pipeline confirms a plate track. "
-            "No event data is created by the application shell."
-        ),
-        planned_milestone="M4-C",
+        empty_title="No events",
     ),
     PageDefinition(
         key="event_detail",
@@ -76,23 +61,15 @@ PAGES = (
         path="/events",
         eyebrow="Review",
         title="Event review",
-        description="Inspect one confirmed plate appearance and its committed evidence.",
-        planned_milestone="M4-C",
         nav=False,
     ),
     PageDefinition(
         key="jobs",
         label="Jobs",
         path="/jobs",
-        eyebrow="Recovery",
+        eyebrow="Jobs",
         title="Processing jobs",
-        description="Inspect durable work, attempts, leases, and recovery actions.",
-        empty_title="No processing jobs yet",
-        empty_description=(
-            "Durable jobs will appear when event processing is implemented. "
-            "This empty state confirms that no work is waiting."
-        ),
-        planned_milestone="M5",
+        empty_title="No jobs",
     ),
     PageDefinition(
         key="cameras",
@@ -100,15 +77,7 @@ PAGES = (
         path="/cameras",
         eyebrow="Sources",
         title="Camera sources",
-        description=(
-            "Save RTSP camera profiles, test a source, and keep credential values outside the app."
-        ),
-        empty_title="No cameras configured",
-        empty_description=(
-            "Add a camera profile below. Passwords and complete secret-bearing RTSP URLs "
-            "never enter the database or the browser."
-        ),
-        planned_milestone="M1-A",
+        empty_title="No cameras",
     ),
     PageDefinition(
         key="models",
@@ -116,16 +85,7 @@ PAGES = (
         path="/models",
         eyebrow="Inference",
         title="Detection models",
-        description=(
-            "Validate detector packages, run bounded still-image checks, and inspect "
-            "source-pixel boxes and timing."
-        ),
-        empty_title="No models imported",
-        empty_description=(
-            "Import a model package to inspect its manifest and provenance. "
-            "Run runtime validation before using the still-image workflow."
-        ),
-        planned_milestone="M2 and M7",
+        empty_title="No models",
     ),
     PageDefinition(
         key="system",
@@ -133,7 +93,6 @@ PAGES = (
         path="/system",
         eyebrow="Diagnostics",
         title="System status",
-        description="Inspect local readiness, configuration sources, and managed storage.",
     ),
 )
 
@@ -230,17 +189,14 @@ def _runtime_rows(runtime_status: dict[str, Any]) -> list[dict[str, str]]:
         {
             "label": "Active model",
             "value": "Not loaded",
-            "detail": "Core ML support is not part of M0.",
         },
         {
             "label": "Worker",
             "value": "Not started",
-            "detail": "Durable processing is not part of M0.",
         },
         {
             "label": "Unresolved failures",
             "value": "None recorded",
-            "detail": "Runtime work is not enabled by the application shell.",
         },
     ]
 
@@ -319,13 +275,10 @@ def _model_feedback(request: Request) -> dict[str, str] | None:
     if notice is None:
         return None
     messages = {
-        "imported": ("positive", "Model package imported. Runtime model loading was not run."),
-        "validated": (
-            "positive",
-            "Model package checks passed. Runtime model loading was not run.",
-        ),
+        "imported": ("positive", "Model package imported."),
+        "validated": ("positive", "Model package checks passed."),
         "invalid": ("attention", "Model package checks failed."),
-        "activated": ("positive", "Model activated for the next runtime slice."),
+        "activated": ("positive", "Model activated."),
         "deactivated": ("positive", "Model deactivated."),
         "deleted": ("positive", "Model deleted."),
         "missing": ("attention", "Model was not found."),
