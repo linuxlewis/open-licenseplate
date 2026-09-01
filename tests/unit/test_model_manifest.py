@@ -153,6 +153,169 @@ def test_manifest_rejects_non_object_input() -> None:
         parse_manifest(_manifest(input=["not", "an", "object"]))
 
 
+def test_manifest_accepts_supported_additional_input_roles() -> None:
+    manifest = parse_manifest(
+        _manifest(
+            input={
+                "name": "image",
+                "kind": "image",
+                "width": 640,
+                "height": 640,
+                "color_space": "rgb",
+                "additional_inputs": [
+                    {
+                        "name": "model_iou",
+                        "kind": "double",
+                        "role": "iou_threshold",
+                        "optional": True,
+                        "default": 0.45,
+                    },
+                    {
+                        "name": "model_confidence",
+                        "kind": "double",
+                        "role": "confidence_threshold",
+                        "optional": True,
+                        "default": 0.35,
+                        "shape": [],
+                    },
+                ],
+            }
+        )
+    )
+
+    assert manifest.raw["input"]["additional_inputs"][1]["role"] == "confidence_threshold"
+
+
+@pytest.mark.parametrize(
+    ("additional_inputs", "message"),
+    [
+        ("not-a-list", "additional_inputs"),
+        ([{"name": "threshold", "kind": "double", "role": "unsupported"}], "role"),
+        (
+            [
+                {
+                    "name": "threshold",
+                    "kind": "int64",
+                    "role": "confidence_threshold",
+                    "optional": True,
+                    "default": 0.35,
+                }
+            ],
+            "kind",
+        ),
+        (
+            [
+                {
+                    "name": "threshold",
+                    "kind": "double",
+                    "role": "confidence_threshold",
+                    "optional": True,
+                    "default": 0.35,
+                    "shape": [1],
+                }
+            ],
+            "shape",
+        ),
+        (
+            [
+                {
+                    "name": "",
+                    "kind": "double",
+                    "role": "confidence_threshold",
+                    "optional": True,
+                    "default": 0.35,
+                }
+            ],
+            "name",
+        ),
+        (
+            [
+                {
+                    "name": "first",
+                    "kind": "double",
+                    "role": "confidence_threshold",
+                    "optional": True,
+                    "default": 0.35,
+                },
+                {
+                    "name": "second",
+                    "kind": "double",
+                    "role": "confidence_threshold",
+                    "optional": True,
+                    "default": 0.35,
+                },
+            ],
+            "duplicates",
+        ),
+    ],
+)
+def test_manifest_rejects_invalid_additional_inputs(
+    additional_inputs: object,
+    message: str,
+) -> None:
+    with pytest.raises(ModelManifestError, match=message):
+        parse_manifest(
+            _manifest(
+                input={
+                    "name": "image",
+                    "kind": "image",
+                    "width": 640,
+                    "height": 640,
+                    "color_space": "rgb",
+                    "additional_inputs": additional_inputs,
+                }
+            )
+        )
+
+
+def test_manifest_rejects_additional_input_name_collisions() -> None:
+    additional_input = {
+        "name": "image",
+        "kind": "double",
+        "role": "confidence_threshold",
+        "optional": True,
+        "default": 0.35,
+    }
+
+    with pytest.raises(ModelManifestError, match="name"):
+        parse_manifest(
+            _manifest(
+                input={
+                    "name": "image",
+                    "kind": "image",
+                    "width": 640,
+                    "height": 640,
+                    "color_space": "rgb",
+                    "additional_inputs": [additional_input],
+                }
+            )
+        )
+
+
+def test_manifest_rejects_an_unrepresentably_large_additional_input_default() -> None:
+    additional_input = {
+        "name": "confidence",
+        "kind": "double",
+        "role": "confidence_threshold",
+        "optional": True,
+        "default": 10**1000,
+    }
+
+    with pytest.raises(ModelManifestError, match="additional_inputs.default"):
+        parse_manifest(
+            _manifest(
+                input={
+                    "name": "image",
+                    "kind": "image",
+                    "width": 640,
+                    "height": 640,
+                    "color_space": "rgb",
+                    "additional_inputs": [additional_input],
+                }
+            )
+        )
+
+
 def test_manifest_accepts_declared_raw_output_contract() -> None:
     manifest = parse_manifest(
         _manifest(

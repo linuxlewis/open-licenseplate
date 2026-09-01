@@ -84,6 +84,19 @@ def _inspection_from_manifest(model: ModelDescriptor) -> BackendInspection:
         height=int(input_values["height"]),
         color_space=str(input_values["color_space"]),
     )
+    additional_inputs = input_values.get("additional_inputs")
+    additional_descriptions = (
+        tuple(
+            FeatureDescription(
+                name=str(item["name"]),
+                kind=str(item["kind"]),
+            )
+            for item in additional_inputs
+            if isinstance(item, dict)
+        )
+        if isinstance(additional_inputs, list)
+        else ()
+    )
     output_descriptions = tuple(
         FeatureDescription(name=str(name), kind="multi_array")
         for role, name in output_values.items()
@@ -91,6 +104,6 @@ def _inspection_from_manifest(model: ModelDescriptor) -> BackendInspection:
     )
     return BackendInspection(
         backend=model.manifest.backend,
-        inputs=(input_description,),
+        inputs=(input_description, *additional_descriptions),
         outputs=output_descriptions,
     )
