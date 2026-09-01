@@ -523,14 +523,18 @@ release asset URLs and verified checksums.
 The reproducible catalog build uses:
 
 ```bash
-uv venv --python 3.12.14 /tmp/open-licenseplate-model-catalog/.venv
-uv pip install \
-  --python /tmp/open-licenseplate-model-catalog/.venv/bin/python \
-  ultralytics==8.3.200 coremltools==8.3.0 \
-  torch==2.5.0 torchvision==0.20.0 numpy==1.26.4
-/tmp/open-licenseplate-model-catalog/.venv/bin/python \
+BUILD_ROOT="$(mktemp -d /tmp/open-licenseplate-model-catalog.XXXXXX)"
+uv venv --python 3.12.14 "$BUILD_ROOT/.venv"
+uv pip sync \
+  --python "$BUILD_ROOT/.venv/bin/python" \
+  --python-version 3.12.14 \
+  --python-platform aarch64-apple-darwin \
+  --only-binary :all: \
+  --require-hashes \
+  tools/model_catalog/requirements-macos-arm64.lock
+"$BUILD_ROOT/.venv/bin/python" \
   tools/model_catalog/build.py \
-  --output-dir /tmp/open-licenseplate-model-catalog/output
+  --output-dir "$BUILD_ROOT/output"
 ```
 
 The build script downloads only the three listed weights at the pinned

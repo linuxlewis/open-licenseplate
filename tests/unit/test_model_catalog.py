@@ -244,26 +244,21 @@ def test_conversion_requirements_are_exact_and_hash_locked() -> None:
         for line in requirements
         if line.strip() and not line.lstrip().startswith("#")
     }
+    package_starts = [
+        index
+        for index, line in enumerate(lock)
+        if "==" in line and line and not line[0].isspace() and not line.startswith("#")
+    ]
     locked = {
-        line.split("==", 1)[0].strip().lower(): line.split("==", 1)[1].split("\\", 1)[0].strip()
-        for line in lock
-        if "==" in line and not line.lstrip().startswith("#")
+        lock[index].split("==", 1)[0].strip().lower(): lock[index]
+        .split("==", 1)[1]
+        .split("\\", 1)[0]
+        .strip()
+        for index in package_starts
     }
     assert direct == {name: locked[name] for name in direct}
-    package_blocks = "\n".join(lock).split("\n")
-    for name in direct:
-        start = next(
-            index
-            for index, line in enumerate(package_blocks)
-            if line.lower().startswith(f"{name}==")
-        )
-        end = next(
-            (
-                index
-                for index in range(start + 1, len(package_blocks))
-                if "==" in package_blocks[index] and not package_blocks[index].startswith(" ")
-            ),
-            len(package_blocks),
-        )
-        block = "\n".join(package_blocks[start:end])
-        assert "--hash=sha256:" in block
+    assert len(locked) == len(package_starts)
+    for position, start in enumerate(package_starts):
+        end = package_starts[position + 1] if position + 1 < len(package_starts) else len(lock)
+        block = "\n".join(lock[start:end])
+        assert re.search(r"--hash=sha256:[0-9a-f]{64}\b", block)
