@@ -499,34 +499,50 @@ No cleanup operation may recursively target the application-support root. Cleanu
 
 ### 12.1 Initial detector
 
-The first recommended source is:
+The approved catalog source lock is:
 
 - Repository: `morsetechlab/yolov11-license-plate-detection`
-- Weight: `license-plate-finetune-v1n.pt`
+- Revision: `251a30d7daedca065f56e04b0af04052c907c68f`
+- Weights: `license-plate-finetune-v1n.pt`, `license-plate-finetune-v1s.pt`, and
+  `license-plate-finetune-v1m.pt`
 - Training input: 640 by 640
 - Intended class: license plate
 - License shown by the repository: AGPL-3.0
 
-The model documentation warns that source dataset splits may be contaminated and reported metrics may be inflated. The application must not present upstream metrics as proof of performance for the user's camera.
+The model documentation warns that source dataset splits may be contaminated
+and reported metrics may be inflated. The application must not present
+upstream metrics as proof of performance for the user's camera.
 
-The model is converted outside the live runtime, then imported as a managed `.mlpackage`. The exact Ultralytics and `coremltools` versions and conversion arguments are recorded with the model.
+The model is converted outside the live runtime, then imported as a managed
+`.mlpackage`. The exact source file, source checksum, Ultralytics and
+`coremltools` versions, conversion arguments, inspected Core ML contract,
+package tree checksum, archive checksum, and release asset name are recorded in
+the generated catalog manifests. The committed lock file contains fixed HTTPS
+release asset URLs and verified checksums.
 
-An initial developer conversion recipe is expected to resemble:
+The reproducible catalog build uses:
 
 ```bash
-hf download \
-  morsetechlab/yolov11-license-plate-detection \
-  license-plate-finetune-v1n.pt \
-  --local-dir models/license-plate
-
-yolo export \
-  model=models/license-plate/license-plate-finetune-v1n.pt \
-  format=coreml \
-  imgsz=640 \
-  nms=True
+BUILD_ROOT="$(mktemp -d /tmp/open-licenseplate-model-catalog.XXXXXX)"
+uv venv --python 3.12.14 "$BUILD_ROOT/.venv"
+uv pip sync \
+  --python "$BUILD_ROOT/.venv/bin/python" \
+  --python-version 3.12.14 \
+  --python-platform aarch64-apple-darwin \
+  --only-binary :all: \
+  --require-hashes \
+  tools/model_catalog/requirements-macos-arm64.lock
+"$BUILD_ROOT/.venv/bin/python" \
+  tools/model_catalog/build.py \
+  --output-dir "$BUILD_ROOT/output"
 ```
 
-This is an example, not an immutable promise. M2 must pin compatible tool versions, inspect the actual exported contract, and update the manifest and documentation to match it.
+The build script downloads only the three listed weights at the pinned
+revision. It exports Core ML with NMS enabled, inspects the actual package,
+normalizes volatile package metadata, creates reproducible archives, and
+writes the catalog metadata. Automatic download from these pinned assets is an
+approved later extension; custom local model import remains a required
+fallback.
 
 ### 12.2 Model manifest
 
@@ -1459,7 +1475,8 @@ import model and manifest -> validate -> choose sample image
 - Compute-unit selection at load time.
 - Fake backend with deterministic detections for non-Mac tests.
 
-**Out of scope:** RTSP inference, tracking, event persistence, OCR, model download automation, and training.
+**Out of scope:** RTSP inference, tracking, event persistence, OCR,
+unapproved or unpinned model download automation, and training.
 
 **Human validation:**
 
@@ -1715,7 +1732,8 @@ save multiple cameras/models -> test each -> choose one active pair
 - Source/license and provenance display.
 - Safe removal checks.
 
-**Out of scope:** Simultaneous cameras, hot model swap, PTZ control, and automatic model download.
+**Out of scope:** Simultaneous cameras, hot model swap, PTZ control, and
+automatic download from sources outside the verified catalog lock.
 
 **Human validation:**
 

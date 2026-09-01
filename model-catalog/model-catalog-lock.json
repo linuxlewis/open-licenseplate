@@ -1,0 +1,74 @@
+{
+  "catalog_id": "open-licenseplate-model-catalog-v1",
+  "models": [
+    {
+      "archive_asset": "open-licenseplate-model-catalog-license-plate-yolov11n.zip",
+      "archive_sha256": "b482b8fe61503e6e81f1b4d041bf1f1f44f71dddd3e9ab23d10641f53cb2c6ce",
+      "archive_size": 5391322,
+      "archive_url": "https://github.com/linuxlewis/open-licenseplate/releases/download/model-catalog-v1/open-licenseplate-model-catalog-license-plate-yolov11n.zip",
+      "id": "license-plate-yolov11n",
+      "license": "AGPL-3.0",
+      "manifest": "manifests/license-plate-yolov11n.json",
+      "manifest_asset": "license-plate-yolov11n.json",
+      "manifest_sha256": "c56d7c44292c057dd4458ea365b51a20d0d393f098d6633112e6f71c688e2037",
+      "package_sha256": "0ef12cc52daa3caa8a99b3d64f8c7a6e6371f2fdc24a474e1b8faa85e4e1e9a1",
+      "release_tag": "model-catalog-v1",
+      "source": {
+        "file": "license-plate-finetune-v1n.pt",
+        "license": "AGPL-3.0",
+        "repository": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection",
+        "revision": "251a30d7daedca065f56e04b0af04052c907c68f",
+        "sha256": "0aec75976c56eb6f26dfb274c430620ec65137915ff1ae47c3a48c7af8afb7b2",
+        "url": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection/resolve/251a30d7daedca065f56e04b0af04052c907c68f/license-plate-finetune-v1n.pt"
+      }
+    },
+    {
+      "archive_asset": "open-licenseplate-model-catalog-license-plate-yolov11s.zip",
+      "archive_sha256": "0cae6886e185cc347c0de8afc53d8fd3e6e80d62f78e5a85ba8f3bc5ef436310",
+      "archive_size": 19053268,
+      "archive_url": "https://github.com/linuxlewis/open-licenseplate/releases/download/model-catalog-v1/open-licenseplate-model-catalog-license-plate-yolov11s.zip",
+      "id": "license-plate-yolov11s",
+      "license": "AGPL-3.0",
+      "manifest": "manifests/license-plate-yolov11s.json",
+      "manifest_asset": "license-plate-yolov11s.json",
+      "manifest_sha256": "d7cb1028306a95f68100a89d1e3bd57aeca7342607253ec379c325222fc75a7e",
+      "package_sha256": "bf2806ec780236c4c258a103f512013a4a0f796cb4185e7a4b6c142f84c5fee0",
+      "release_tag": "model-catalog-v1",
+      "source": {
+        "file": "license-plate-finetune-v1s.pt",
+        "license": "AGPL-3.0",
+        "repository": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection",
+        "revision": "251a30d7daedca065f56e04b0af04052c907c68f",
+        "sha256": "95e50c25ab7066dd0ca5aec18fa80349676db08697780d1149576461174d2381",
+        "url": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection/resolve/251a30d7daedca065f56e04b0af04052c907c68f/license-plate-finetune-v1s.pt"
+      }
+    },
+    {
+      "archive_asset": "open-licenseplate-model-catalog-license-plate-yolov11m.zip",
+      "archive_sha256": "3e09b5e3535289b9bcfcb3087aa685900546ae9ecf14c717d607cfc381b2fecc",
+      "archive_size": 40334020,
+      "archive_url": "https://github.com/linuxlewis/open-licenseplate/releases/download/model-catalog-v1/open-licenseplate-model-catalog-license-plate-yolov11m.zip",
+      "id": "license-plate-yolov11m",
+      "license": "AGPL-3.0",
+      "manifest": "manifests/license-plate-yolov11m.json",
+      "manifest_asset": "license-plate-yolov11m.json",
+      "manifest_sha256": "8995663d428f43503b35de34c08151d405bd46adfc56f4f5708a8399653df077",
+      "package_sha256": "a49d1f50d10d66b2fdb2b84cae202e70d4a60afa74760187bb9e9d73cc64260b",
+      "release_tag": "model-catalog-v1",
+      "source": {
+        "file": "license-plate-finetune-v1m.pt",
+        "license": "AGPL-3.0",
+        "repository": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection",
+        "revision": "251a30d7daedca065f56e04b0af04052c907c68f",
+        "sha256": "d691f8d5e7709d2065b18a0e2bd75deaf08f6115cc0295cc3de7d0fd2eabcdae",
+        "url": "https://huggingface.co/morsetechlab/yolov11-license-plate-detection/resolve/251a30d7daedca065f56e04b0af04052c907c68f/license-plate-finetune-v1m.pt"
+      }
+    }
+  ],
+  "release": {
+    "prerelease": true,
+    "repository": "linuxlewis/open-licenseplate",
+    "tag": "model-catalog-v1"
+  },
+  "schema_version": 1
+}

@@ -125,6 +125,21 @@ thread, not in the FastAPI event loop. The fake backend and deterministic plate
 fixtures support portable acceptance tests. See `docs/m2-acceptance.md` for
 the automated commands and human checklist.
 
+### Approved model catalog extension
+
+The repository now defines three pinned, verified Core ML catalog assets:
+YOLOv11 nano, small, and medium license-plate detectors. Their manifests,
+source revisions, conversion arguments, inspected input/output contracts, and
+checksums are in `model-catalog/`. The catalog assets are distributed in the
+`model-catalog-v1` prerelease with AGPL-3.0 attribution in
+`model-catalog/THIRD_PARTY_NOTICES.md`.
+
+Automatic download from this verified catalog is an approved later extension.
+This asset change does not add downloader endpoints or Models page controls.
+The custom model import option remains required for user-supplied models.
+Upstream metrics are not product performance claims. Validate a selected model
+on held-out data that represents the operator's cameras and plates.
+
 Audit managed files for unredacted secret patterns with:
 
 ```bash

@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from open_licenseplate.models import archive
-from open_licenseplate.models.archive import ModelArchiveError, validate_and_extract_archive
+from open_licenseplate.models.archive import (
+    ModelArchiveError,
+    validate_and_extract_archive,
+    validate_package_directory,
+)
 
 
 def _write_zip(path: Path, entries: list[tuple[str, bytes, int | None]]) -> None:
@@ -39,6 +43,23 @@ def test_archive_extracts_one_safe_package(tmp_path: Path) -> None:
 
     assert package.is_dir()
     assert (package / "Data" / "weights.bin").read_bytes() == b"weights"
+
+
+def test_package_directory_validator_returns_checked_files(tmp_path: Path) -> None:
+    package = tmp_path / "model.mlpackage"
+    (package / "Data").mkdir(parents=True)
+    (package / "Manifest.json").write_text("{}", encoding="utf-8")
+    (package / "Data" / "weights.bin").write_bytes(b"weights")
+
+    checked_files = validate_package_directory(
+        package,
+        expected_artifact="model.mlpackage",
+    )
+
+    assert sorted(relative.as_posix() for _path, relative in checked_files) == [
+        "Data/weights.bin",
+        "Manifest.json",
+    ]
 
 
 @pytest.mark.parametrize(

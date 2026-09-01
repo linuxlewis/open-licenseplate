@@ -1,0 +1,6 @@
+# Direct conversion requirements for macOS arm64 and Python 3.12.14.
+coremltools==8.3.0
+numpy==1.26.4
+torch==2.5.0
+torchvision==0.20.0
+ultralytics==8.3.200
