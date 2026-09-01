@@ -707,7 +707,7 @@ def test_browser_can_import_and_manage_a_model_package(
     assert "Runtime validation was not run" in page.content()
     page.get_by_role("button", name="Delete", exact=True).click()
     page.wait_for_url(f"{browser_base_url}/models?notice=deleted")
-    assert page.get_by_text("No managed model packages yet.").is_visible()
+    assert page.get_by_role("heading", name="No models", exact=True).is_visible()
 
 
 @pytest.mark.browser

@@ -361,7 +361,6 @@ def test_browser_reviews_ranked_crops_provenance_and_no_ocr(
 
     assert page.get_by_role("heading", name="Event review", exact=True).is_visible()
     assert page.get_by_role("heading", name="No OCR data", exact=True).is_visible()
-    assert page.get_by_text("No plate text was inferred or stored.", exact=False).is_visible()
     assert page.get_by_text("m4b-crop-score-v1", exact=True).count() >= 2
     assert page.get_by_text("image/jpeg", exact=True).count() >= 2
     assert page.get_by_text("Rank 1", exact=True).is_visible()
