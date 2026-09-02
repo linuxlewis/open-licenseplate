@@ -5,12 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="Local-first license plate detection">
     <title>{{ page.title }} - {{ app_name }}</title>
-    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}">
-    <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}" defer></script>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='app.css') }}?v={{ static_asset_version }}">
+    <script src="{{ request.url_for('static', path='vendor/htmx.min.js') }}?v={{ static_asset_version }}" defer></script>
+    <script type="module" src="{{ request.url_for('static', path='model-catalog.js') }}?v={{ static_asset_version }}" defer></script>
     {% if page.key == "live" %}
-      <script src="{{ request.url_for('static', path='live.js') }}" defer></script>
+      <script src="{{ request.url_for('static', path='live.js') }}?v={{ static_asset_version }}" defer></script>
     {% elif page.key == "models" %}
-      <script type="module" src="{{ request.url_for('static', path='model-detection.js') }}" defer></script>
+      <script type="module" src="{{ request.url_for('static', path='model-detection.js') }}?v={{ static_asset_version }}" defer></script>
     {% endif %}
   </head>
   <body class="density-{{ ui_density }}">
@@ -609,30 +610,50 @@
               </div>
             {% endif %}
 
+            <section
+              class="card card-wide model-catalog-card"
+              data-model-catalog
+              aria-labelledby="model-catalog-title"
+            >
+              <div class="card-heading">
+                <div>
+                  <span class="eyebrow">Catalog</span>
+                  <h2 id="model-catalog-title">Predefined models</h2>
+                </div>
+                <span class="card-icon" aria-hidden="true">PICK</span>
+              </div>
+              <div class="catalog-status" data-catalog-status role="status" aria-live="polite">
+                Loading models...
+              </div>
+              <div class="catalog-grid" data-catalog-list></div>
+            </section>
+
             <div class="model-layout">
               <section class="card model-form-card">
-                <div class="card-heading">
-                  <div>
-                    <span class="eyebrow">Import</span>
-                    <h2>Add model package</h2>
-                  </div>
-                  <span class="card-icon" aria-hidden="true">NEW</span>
-                </div>
-                {% if database.status == "ok" %}
-                  <form class="model-form" method="post" action="/models/import" enctype="multipart/form-data">
-                    <label class="field-label" for="model-manifest">Manifest</label>
-                    <input id="model-manifest" name="manifest" type="file" required accept=".json,.yaml,.yml">
+                <details class="custom-model" open>
+                  <summary>
+                    <span>
+                      <span class="eyebrow">Import</span>
+                      <strong>Custom model</strong>
+                    </span>
+                    <span class="card-icon" aria-hidden="true">NEW</span>
+                  </summary>
+                  {% if database.status == "ok" %}
+                    <form class="model-form" method="post" action="/models/import" enctype="multipart/form-data">
+                      <label class="field-label" for="model-manifest">Manifest</label>
+                      <input id="model-manifest" name="manifest" type="file" required accept=".json,.yaml,.yml">
 
-                    <label class="field-label" for="model-archive">Model archive</label>
-                    <input id="model-archive" name="archive" type="file" required accept=".zip">
+                      <label class="field-label" for="model-archive">Model archive</label>
+                      <input id="model-archive" name="archive" type="file" required accept=".zip">
 
-                    <button class="save-button" type="submit">Import model</button>
-                  </form>
-                {% else %}
-                  <p class="form-note">
-                    Run the database upgrade command before importing a model.
-                  </p>
-                {% endif %}
+                      <button class="save-button" type="submit">Import model</button>
+                    </form>
+                  {% else %}
+                    <p class="form-note">
+                      Run the database upgrade command before importing a model.
+                    </p>
+                  {% endif %}
+                </details>
               </section>
 
             </div>
