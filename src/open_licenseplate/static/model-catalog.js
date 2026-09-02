@@ -122,11 +122,11 @@ async function installCatalogModel(entry, card, action, installed, status) {
     if (!response.ok) {
       throw new Error("install request failed");
     }
-    const root = card.closest("[data-model-catalog]");
-    if (!(root instanceof HTMLElement)) {
-      throw new Error("the catalog could not be refreshed");
-    }
-    await loadCatalog(root, "Refreshing...");
+    entry.installed = true;
+    entry.install_available = false;
+    card.dataset.installing = "false";
+    card.setAttribute("aria-busy", "false");
+    updateCatalogCard(card, entry, { installed, action, status });
   } catch {
     card.dataset.installing = "false";
     card.setAttribute("aria-busy", "false");
