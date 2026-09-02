@@ -856,10 +856,6 @@ body.density-compact .status-item {
   background: rgba(223, 93, 80, 0.1);
 }
 
-.catalog-details .detail-row {
-  grid-template-columns: minmax(55px, 0.7fr) minmax(0, 1.3fr);
-}
-
 .catalog-item-footer {
   display: flex;
   align-items: center;

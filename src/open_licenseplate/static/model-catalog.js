@@ -1,46 +1,5 @@
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes < 0) {
-    return "Unknown";
-  }
-  const units = ["B", "KB", "MB", "GB"];
-  let value = bytes;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  const precision = unitIndex === 0 || value >= 100 ? 0 : 1;
-  return `${value.toFixed(precision)} ${units[unitIndex]}`;
-}
-
-function shortModelName(displayName) {
-  return displayName
-    .replace(/^YOLOv\d+\s+/i, "")
-    .replace(/\s+License Plate Detector$/i, "");
-}
-
-function recommendationLabel(recommendation) {
-  const labels = {
-    fast_default: "Recommended",
-    balanced: "Balanced",
-    higher_capacity: "Higher capacity",
-  };
-  return labels[recommendation] || recommendation.replaceAll("_", " ");
-}
-
 function setText(element, value) {
   element.textContent = value;
-}
-
-function createDetailRow(label, value) {
-  const row = document.createElement("div");
-  row.className = "detail-row";
-  const term = document.createElement("dt");
-  const detail = document.createElement("dd");
-  setText(term, label);
-  setText(detail, value);
-  row.append(term, detail);
-  return row;
 }
 
 function createCatalogCard(entry, onInstall) {
@@ -51,26 +10,14 @@ function createCatalogCard(entry, onInstall) {
 
   const heading = document.createElement("div");
   heading.className = "catalog-item-heading";
-  const titleGroup = document.createElement("div");
   const name = document.createElement("h3");
   const recommendation = document.createElement("span");
-  titleGroup.className = "catalog-title-group";
   name.className = "catalog-item-name";
   recommendation.className = "catalog-recommendation";
-  if (entry.recommendation === "fast_default") {
-    recommendation.classList.add("catalog-recommendation-recommended");
-  }
-  setText(name, shortModelName(entry.display_name));
-  setText(recommendation, recommendationLabel(entry.recommendation));
-  titleGroup.append(name);
-  heading.append(titleGroup, recommendation);
-
-  const details = document.createElement("dl");
-  details.className = "detail-list catalog-details";
-  details.append(
-    createDetailRow("Size", formatBytes(entry.archive_size)),
-    createDetailRow("License", entry.license),
-  );
+  setText(name, "YOLO license plate model");
+  setText(recommendation, "Recommended");
+  recommendation.classList.add("catalog-recommendation-recommended");
+  heading.append(name, recommendation);
 
   const status = document.createElement("p");
   status.className = "catalog-item-status";
@@ -89,7 +36,7 @@ function createCatalogCard(entry, onInstall) {
   action.addEventListener("click", () => onInstall(entry, card, action, installed, status));
   footer.append(installed, action);
 
-  card.append(heading, details, footer, status);
+  card.append(heading, footer, status);
   updateCatalogCard(card, entry, { installed, action, status });
   return card;
 }
@@ -118,11 +65,6 @@ async function responsePayload(response) {
   }
 }
 
-function errorMessage(payload, fallback) {
-  const detail = typeof payload.detail === "string" ? payload.detail.trim() : "";
-  return detail || fallback;
-}
-
 async function loadCatalog(root, previousStatus = "") {
   const status = root.querySelector("[data-catalog-status]");
   const list = root.querySelector("[data-catalog-list]");
@@ -130,29 +72,31 @@ async function loadCatalog(root, previousStatus = "") {
     return;
   }
 
-  setText(status, previousStatus || "Loading models...");
+  setText(status, previousStatus || "Loading model...");
   try {
     const response = await fetch("/api/v1/models/catalog", {
       credentials: "same-origin",
     });
     const payload = await responsePayload(response);
     if (!response.ok || !Array.isArray(payload.models)) {
-      throw new Error(errorMessage(payload, "catalog loading failed"));
+      throw new Error("catalog request failed");
     }
 
-    const cards = payload.models.map((entry) =>
-      createCatalogCard(entry, installCatalogModel),
-    );
-    list.replaceChildren(...cards);
-    list.hidden = cards.length === 0;
-    setText(status, cards.length ? "" : "No predefined models are available.");
-  } catch (error) {
+    const entry = payload.models.find((model) => model.recommendation === "fast_default");
+    if (!entry) {
+      list.replaceChildren();
+      list.hidden = true;
+      setText(status, "No recommended model is available.");
+      return;
+    }
+
+    list.replaceChildren(createCatalogCard(entry, installCatalogModel));
+    list.hidden = false;
+    setText(status, "");
+  } catch {
     list.replaceChildren();
     list.hidden = true;
-    setText(
-      status,
-      `Catalog could not be loaded. ${error instanceof Error ? error.message : "Refresh the page and try again."}`,
-    );
+    setText(status, "Catalog unavailable. Refresh the page and try again.");
   }
 }
 
@@ -175,23 +119,21 @@ async function installCatalogModel(entry, card, action, installed, status) {
         credentials: "same-origin",
       },
     );
-    const payload = await responsePayload(response);
     if (!response.ok) {
-      throw new Error(errorMessage(payload, "the install request failed"));
+      throw new Error("install request failed");
     }
     const root = card.closest("[data-model-catalog]");
     if (!(root instanceof HTMLElement)) {
       throw new Error("the catalog could not be refreshed");
     }
-    await loadCatalog(root, "Installed. Refreshing status...");
-  } catch (error) {
+    await loadCatalog(root, "Refreshing...");
+  } catch {
     card.dataset.installing = "false";
     card.setAttribute("aria-busy", "false");
     action.disabled = false;
     setText(action, "Install");
     status.hidden = false;
-    const detail = error instanceof Error ? error.message : "the install request failed";
-    setText(status, `Install failed: ${detail}. Try again.`);
+    setText(status, "Install failed. Try again.");
   }
 }
 
