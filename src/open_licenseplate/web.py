@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,22 @@ from .redaction import redact_text
 
 _WEB_DIRECTORY = Path(__file__).resolve().parent
 STATIC_DIRECTORY = _WEB_DIRECTORY / "static"
+
+
+def _static_asset_version(static_directory: Path) -> str:
+    """Return one stable version for the complete packaged static tree."""
+    digest = hashlib.sha256()
+    for path in sorted(path for path in static_directory.rglob("*") if path.is_file()):
+        relative_path = path.relative_to(static_directory).as_posix().encode("utf-8")
+        content = path.read_bytes()
+        digest.update(len(relative_path).to_bytes(8, "big"))
+        digest.update(relative_path)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()[:16]
+
+
+STATIC_ASSET_VERSION = _static_asset_version(STATIC_DIRECTORY)
 templates = Jinja2Templates(directory=str(_WEB_DIRECTORY / "templates"))
 
 
@@ -332,6 +349,7 @@ def _context(
         "request": request,
         "app_name": settings.app_name,
         "app_version": __version__,
+        "static_asset_version": STATIC_ASSET_VERSION,
         "ui_density": settings.ui.density,
         "page": page,
         "page_index": "M4"

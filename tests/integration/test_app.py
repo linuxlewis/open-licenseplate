@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from open_licenseplate.app import create_app
 from open_licenseplate.config import load_settings
 from open_licenseplate.database import upgrade_database
+from open_licenseplate.web import STATIC_ASSET_VERSION, STATIC_DIRECTORY, _static_asset_version
 
 
 def _settings(tmp_path: Path):
@@ -77,6 +78,36 @@ def test_shell_routes_render_with_navigation_and_security_headers(tmp_path: Path
         assert "--canvas:" in css_response.text
         assert htmx_response.status_code == 200
         assert "htmx" in htmx_response.text
+
+
+def test_shell_static_urls_use_the_deterministic_asset_version(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    upgrade_database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+
+    with TestClient(create_app(settings)) as client:
+        live_response = client.get("/live")
+        models_response = client.get("/models")
+
+    assert _static_asset_version(STATIC_DIRECTORY) == STATIC_ASSET_VERSION
+    for asset in ("app.css", "vendor/htmx.min.js", "model-catalog.js", "live.js"):
+        assert f"/static/{asset}?v={STATIC_ASSET_VERSION}" in live_response.text
+    for asset in ("app.css", "vendor/htmx.min.js", "model-catalog.js", "model-detection.js"):
+        assert f"/static/{asset}?v={STATIC_ASSET_VERSION}" in models_response.text
+
+
+def test_static_asset_version_is_deterministic_and_changes_when_a_file_changes(
+    tmp_path: Path,
+) -> None:
+    static_directory = tmp_path / "static"
+    static_directory.mkdir()
+    asset = static_directory / "app.js"
+    asset.write_text("first", encoding="utf-8")
+
+    first_version = _static_asset_version(static_directory)
+    assert first_version == _static_asset_version(static_directory)
+
+    asset.write_text("second", encoding="utf-8")
+    assert _static_asset_version(static_directory) != first_version
 
 
 def test_system_page_shows_versions_paths_database_and_setting_sources(tmp_path: Path) -> None:
