@@ -122,11 +122,7 @@ async function installCatalogModel(entry, card, action, installed, status) {
     if (!response.ok) {
       throw new Error("install request failed");
     }
-    entry.installed = true;
-    entry.install_available = false;
-    card.dataset.installing = "false";
-    card.setAttribute("aria-busy", "false");
-    updateCatalogCard(card, entry, { installed, action, status });
+    window.location.reload();
   } catch {
     card.dataset.installing = "false";
     card.setAttribute("aria-busy", "false");

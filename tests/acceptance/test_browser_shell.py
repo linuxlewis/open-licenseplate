@@ -21,14 +21,41 @@ from model_helpers import create_model_fixture
 from open_licenseplate.app import create_app
 from open_licenseplate.capture import FixtureAttempt, ReconnectFixture, make_preview_frame
 from open_licenseplate.config import load_settings
-from open_licenseplate.database import upgrade_database
+from open_licenseplate.database import Database, upgrade_database
 from open_licenseplate.inference.backends import FakeBackend
+from open_licenseplate.models.repository import ModelRepository
+from open_licenseplate.models.service import import_model
+from open_licenseplate.paths import ManagedPaths
 
 
 def _free_port() -> int:
     with socket.socket() as socket_instance:
         socket_instance.bind(("127.0.0.1", 0))
         return int(socket_instance.getsockname()[1])
+
+
+def _seed_managed_model(tmp_path: Path, model_id: str) -> None:
+    fixture_root = tmp_path / "catalog-install-fixture"
+    manifest_path, archive_path, _manifest = create_model_fixture(
+        fixture_root,
+        model_id=model_id,
+    )
+    settings = load_settings(
+        cli_overrides={
+            "storage.data_dir": tmp_path / "data",
+            "storage.log_dir": tmp_path / "logs",
+        }
+    )
+    database = Database(settings.storage.data_dir / "open-licenseplate.sqlite3")
+    try:
+        import_model(
+            manifest_value=manifest_path.read_bytes(),
+            source_path=archive_path,
+            paths=ManagedPaths.from_settings(settings),
+            repository=ModelRepository(database),
+        )
+    finally:
+        database.dispose()
 
 
 @pytest.fixture
@@ -259,6 +286,19 @@ def test_browser_models_page_shows_only_the_recommended_catalog_model(
     target = next(
         entry for entry in catalog_payload["models"] if entry["recommendation"] == "fast_default"
     )
+    other_entries = [
+        entry for entry in catalog_payload["models"] if entry["catalog_id"] != target["catalog_id"]
+    ]
+    assert other_entries
+    html_like_value = '<img src=x onerror="window.__catalogXss = true">'
+    target["catalog_id"] = html_like_value
+    target["display_name"] = html_like_value
+    target["license"] = html_like_value
+    target["source"]["repository"] = html_like_value
+    target["source"]["revision"] = html_like_value
+    catalog_payload["models"] = [other_entries[0], target, *other_entries[1:]]
+    assert catalog_payload["models"][0]["recommendation"] != "fast_default"
+    assert catalog_payload["models"][1]["recommendation"] == "fast_default"
 
     def catalog_route(route: Any, request: Any) -> None:
         del request
@@ -275,9 +315,11 @@ def test_browser_models_page_shows_only_the_recommended_catalog_model(
     cards = page.locator("[data-catalog-card]")
     cards.first.wait_for()
     assert cards.count() == 1
-    assert cards.first.get_attribute("data-catalog-id") == target["catalog_id"]
+    assert cards.first.get_attribute("data-catalog-id") == html_like_value
     assert cards.first.locator(".catalog-item-name").text_content() == "YOLO license plate model"
     assert cards.first.locator(".catalog-recommendation").text_content() == "Recommended"
+    assert cards.first.locator("img, script").count() == 0
+    assert page.evaluate("window.__catalogXss === true") is False
     catalog_text = catalog.text_content() or ""
     assert all(label not in catalog_text for label in ("Nano", "Small", "Medium"))
     assert page.get_by_role("button", name="Install", exact=True).count() == 1
@@ -300,9 +342,42 @@ def test_browser_models_page_shows_only_the_recommended_catalog_model(
 
 
 @pytest.mark.browser
-def test_browser_catalog_install_refreshes_state_and_prevents_duplicate_clicks(
+def test_browser_models_page_shows_initially_installed_recommended_catalog_model(
     browser_base_url: str,
     chromium,
+) -> None:
+    page = chromium.new_page(viewport={"width": 1280, "height": 900})
+    catalog_url = f"{browser_base_url}/api/v1/models/catalog"
+    catalog_payload = page.request.get(catalog_url).json()
+    target = next(
+        entry for entry in catalog_payload["models"] if entry["recommendation"] == "fast_default"
+    )
+    target["installed"] = True
+    target["install_available"] = False
+
+    def catalog_route(route: Any, request: Any) -> None:
+        del request
+        route.fulfill(
+            status=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps(catalog_payload),
+        )
+
+    page.route(f"{catalog_url}**", catalog_route)
+    page.goto(f"{browser_base_url}/models", wait_until="domcontentloaded")
+
+    card = page.locator("[data-catalog-card]")
+    card.first.wait_for()
+    assert card.count() == 1
+    assert card.locator(".catalog-installed").text_content() == "Installed"
+    assert page.get_by_role("button", name="Install", exact=True).count() == 0
+
+
+@pytest.mark.browser
+def test_browser_catalog_install_updates_server_rendered_model_list_and_prevents_duplicate_clicks(
+    browser_base_url: str,
+    chromium,
+    tmp_path: Path,
 ) -> None:
     page = chromium.new_page(viewport={"width": 1280, "height": 900})
     catalog_url = f"{browser_base_url}/api/v1/models/catalog"
@@ -311,11 +386,15 @@ def test_browser_catalog_install_refreshes_state_and_prevents_duplicate_clicks(
         entry for entry in initial_payload["models"] if entry["recommendation"] == "fast_default"
     )
     install_state = {"installed": False}
+    managed_model_seeded = {"value": False}
     post_urls: list[str] = []
 
     def catalog_route(route: Any, request: Any) -> None:
         if request.method == "POST":
             post_urls.append(request.url)
+            if not managed_model_seeded["value"]:
+                _seed_managed_model(tmp_path, target["catalog_id"])
+                managed_model_seeded["value"] = True
             install_state["installed"] = True
             time.sleep(0.25)
             route.fulfill(
@@ -351,6 +430,7 @@ def test_browser_catalog_install_refreshes_state_and_prevents_duplicate_clicks(
     )
     assert button_state == {"disabled": True, "text": "Installing..."}
 
+    page.locator(".model-list-card .model-item").first.wait_for(timeout=5000)
     page.wait_for_function(
         """() => document.querySelector(
           "[data-catalog-card] .catalog-installed"
@@ -361,6 +441,9 @@ def test_browser_catalog_install_refreshes_state_and_prevents_duplicate_clicks(
     installed_card.locator(".catalog-installed-true").wait_for(timeout=5000)
     assert installed_card.locator(".catalog-installed").text_content() == "Installed"
     assert installed_card.get_by_role("button", name="Install", exact=True).count() == 0
+    assert page.get_by_text("Test model", exact=True).is_visible()
+    assert page.get_by_role("button", name="Validate package", exact=True).count() == 1
+    assert page.get_by_role("button", name="Delete", exact=True).count() == 1
     assert post_urls == [f"{catalog_url}/{target['catalog_id']}/install"]
 
 
